@@ -23,3 +23,6 @@ secrets/
 pyproject.toml
 
 data/
+
+.venv/
+cache/
