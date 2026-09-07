@@ -3,7 +3,7 @@ PYTHON ?= python3
 VENV   := .venv
 PY     := $(VENV)/bin/python
 
-.PHONY: venv venv-gpu check models manifest qc splits data labeling preprocess test clean-cache
+.PHONY: venv venv-gpu check models manifest qc splits data labeling test clean-cache
 
 venv:
 	$(PYTHON) -m venv $(VENV) && $(PY) -m pip install -q -U pip && $(PY) -m pip install -q -r requirements.txt
@@ -36,14 +36,9 @@ data: manifest qc splits
 labeling:
 	$(PY) scripts/make_labeling_set.py
 
-# Полный GPU-этап по стадиям. Каждая возобновляема; при падении просто
-# запусти цель заново — посчитанное пропустится.
-preprocess:
-	$(PY) scripts/preprocess.py --stage detect   --fp16
-	$(PY) scripts/preprocess.py --stage parse    --fp16
-	$(PY) scripts/preprocess.py --stage pose
-	$(PY) scripts/preprocess.py --stage agnostic
-	$(PY) scripts/preprocess.py --stage latents  --fp16
+# GPU-этап целью не оформлен намеренно: стадиям нужны флаги (--shard,
+# --batch-size, --limit), и при отладке важно видеть, какая именно команда
+# упала. Запускается напрямую, см. README.
 
 test:
 	$(PY) -m pytest tests/ -q

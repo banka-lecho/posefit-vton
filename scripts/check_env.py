@@ -16,6 +16,7 @@ import importlib
 import os
 import platform
 import shutil
+import site
 import subprocess
 import sys
 from pathlib import Path
@@ -36,14 +37,44 @@ def section(title: str) -> None:
     print(f"\n=== {title} ===")
 
 
+def check_interpreter() -> None:
+    """Venv и ~/.local: пакет, найденный вне venv, — источник трудноуловимых
+    конфликтов версий, поэтому расположение важнее самого факта установки."""
+    section("интерпретатор")
+    in_venv = sys.prefix != sys.base_prefix
+    line("внутри venv", in_venv)
+    line("sys.prefix", sys.prefix)
+    if not in_venv:
+        line("ВНИМАНИЕ", "venv не активирован")
+    line("user site включён", site.ENABLE_USER_SITE)
+    try:
+        user_site = site.getusersitepackages()
+        line("user site", f"{user_site}  {'есть' if Path(user_site).exists() else 'нет'}")
+        if site.ENABLE_USER_SITE and Path(user_site).exists():
+            line("ВНИМАНИЕ", "пакеты из ~/.local перекрывают venv; PYTHONNOUSERSITE=1 отключает")
+    except Exception:
+        pass
+
+
 def check_packages() -> None:
     section("пакеты")
+    prefix = Path(sys.prefix)
     for name in PACKAGES:
         try:
             module = importlib.import_module(name)
-            line(name, getattr(module, "__version__", "установлен"))
         except Exception:
             line(name, "— НЕТ")
+            continue
+        version = getattr(module, "__version__", "установлен")
+        path = getattr(module, "__file__", None)
+        where = ""
+        if path:
+            location = Path(path).resolve().parent
+            try:
+                location.relative_to(prefix)
+            except ValueError:
+                where = f"  ВНЕ VENV: {location}"
+        line(name, f"{version}{where}")
 
 
 def check_torch() -> None:
@@ -58,6 +89,10 @@ def check_torch() -> None:
     line("собран под CUDA", torch.version.cuda or "нет (CPU-сборка)")
     line("cuda.is_available", torch.cuda.is_available())
     if not torch.cuda.is_available():
+        # Колесо torch, собранное под CUDA новее драйвера, не видит карту
+        # вовсе. На общем сервере драйвер не обновить, поэтому подбирается
+        # колесо: --index-url .../whl/cuXYZ под версию из nvidia-smi.
+        line("ПОЧЕМУ", "сверь 'собран под CUDA' с версией CUDA из nvidia-smi ниже")
         return
     line("устройств", torch.cuda.device_count())
     for i in range(torch.cuda.device_count()):
@@ -87,6 +122,16 @@ def check_driver() -> None:
             line("nvidia-smi", row.strip())
     except Exception as exc:
         line("nvidia-smi", f"ошибка запуска: {exc}")
+        return
+    try:
+        # Максимальная версия CUDA, которую поддерживает драйвер: колесо
+        # torch должно быть собрано под неё или более раннюю.
+        head = subprocess.run([exe], capture_output=True, text=True, timeout=20, check=False)
+        for row in head.stdout.splitlines():
+            if "CUDA Version" in row:
+                line("драйвер поддерживает", row.split("CUDA Version:")[-1].strip(" |"))
+    except Exception:
+        pass
 
 
 def check_data(config_path: Path) -> None:
@@ -127,6 +172,7 @@ def main() -> int:
     line("python", sys.version.split()[0])
     line("исполняемый файл", sys.executable)
 
+    check_interpreter()
     check_packages()
     check_torch()
     check_driver()

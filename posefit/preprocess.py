@@ -62,8 +62,11 @@ STAGES = {
         Stage("detect", "json"),
         Stage("parse", "png"),
         Stage("pose", "json", needs=("detect",)),
-        Stage("agnostic", "png", needs=("parse", "pose")),
-        Stage("latents", "npy", needs=("agnostic",)),
+        Stage("agnostic", "png", needs=("parse",)),
+        # Латенты обычного кадра. Латенты замаскированного кадра зависят от
+        # соглашения о маскировании в выбранной архитектуре, поэтому считаются
+        # позже, когда бэкбон определён.
+        Stage("latents", "npy"),
     )
 }
 

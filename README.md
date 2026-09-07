@@ -60,15 +60,23 @@ torch+CUDA и detectron2 из исходников, здесь же веса т�
 export POSEFIT_PREPROC_ROOT=/mnt/data/posefit-preproc
 make venv-gpu     # torch ставится отдельно, см. ниже
 make models       # предзагрузка весов
-make preprocess   # все стадии по порядку
+
+python scripts/preprocess.py --stage detect   --fp16
+python scripts/preprocess.py --stage parse    --fp16
+python scripts/preprocess.py --stage pose
+python scripts/preprocess.py --stage agnostic
+python scripts/preprocess.py --stage latents  --fp16
 ```
+
+Стадии запускаются по одной, а не одной целью `make`: им нужны флаги, и при
+отладке важно видеть, какая именно команда упала.
 
 torch не зафиксирован в `requirements-gpu.txt`: колесо зависит от версии CUDA
 и ставится командой с pytorch.org под конкретную машину. Версию подскажет
 `make check`.
 
 Каждая стадия возобновляема — посчитанные файлы пропускаются, так что после
-падения цель просто запускается заново. Для нескольких карт есть шардирование:
+падения команда просто запускается заново. Для нескольких карт есть шардирование:
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 python scripts/preprocess.py --stage parse --shard 0/2 --fp16 &

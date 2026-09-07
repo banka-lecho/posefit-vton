@@ -54,6 +54,15 @@ def load_canonical(path: Path) -> Image.Image:
     return canvas
 
 
+def _report_missing(missing: int, total: int, upstream: str) -> None:
+    """Молчаливый пропуск — худший режим отказа: стадия рапортует успех,
+    не сделав ничего. Поэтому нехватка входов всегда проговаривается."""
+    if not missing:
+        return
+    print(f"\nПРОПУЩЕНО {missing} из {total}: нет результатов стадии {upstream}.")
+    print(f"Сначала прогони --stage {upstream} на тех же кадрах.")
+
+
 def _batches(rows: pd.DataFrame, size: int):
     for start in range(0, len(rows), size):
         yield rows.iloc[start:start + size]
@@ -127,9 +136,11 @@ def run_pose(rows, paths, args) -> None:
     proc = AutoProcessor.from_pretrained(MODELS["pose"])
     model = VitPoseForPoseEstimation.from_pretrained(MODELS["pose"]).to(args.device).eval()
 
+    missing = 0
     for row in tqdm(list(rows.itertuples()), desc="pose", unit="img"):
         det_path = output_path(paths.preproc_root, "detect", row.sku_id, row.image_id)
         if not det_path.exists():
+            missing += 1
             continue
         boxes = json.loads(det_path.read_text(encoding="utf-8"))["boxes"]
         target = output_path(paths.preproc_root, "pose", row.sku_id, row.image_id)
@@ -155,17 +166,23 @@ def run_pose(rows, paths, args) -> None:
             "scores": {n: confidences[i] for i, n in enumerate(COCO_KEYPOINTS) if i < len(confidences)},
         })
 
+    _report_missing(missing, len(rows), "detect")
+
 
 def run_agnostic(rows, paths, args) -> None:
+    missing = 0
     for row in tqdm(list(rows.itertuples()), desc="agnostic", unit="img"):
         parse_path = output_path(paths.preproc_root, "parse", row.sku_id, row.image_id)
         if not parse_path.exists():
+            missing += 1
             continue
         parse = np.array(Image.open(parse_path))
         mask = build_agnostic(parse, row.category_group, dilate_px=args.dilate)
         target = output_path(paths.preproc_root, "agnostic", row.sku_id, row.image_id)
         target.parent.mkdir(parents=True, exist_ok=True)
         Image.fromarray(mask).save(target, optimize=True)
+
+    _report_missing(missing, len(rows), "parse")
 
 
 def run_latents(rows, paths, args) -> None:
