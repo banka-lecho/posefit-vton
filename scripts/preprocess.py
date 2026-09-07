@@ -220,9 +220,11 @@ def main() -> int:
     ap.add_argument("--stage", required=True, choices=list(STAGES))
     ap.add_argument("--config", default=DEFAULT_CONFIG, type=Path)
     ap.add_argument("--shard", default="0/1", help="i/N — часть работы для этого процесса")
-    ap.add_argument("--batch-size", type=int, default=8)
-    ap.add_argument("--device", default="cuda")
-    ap.add_argument("--fp16", action="store_true")
+    # Значения по умолчанию берутся из configs/data.yaml (секция compute);
+    # None означает «флаг не передан», и тогда побеждает конфиг.
+    ap.add_argument("--batch-size", type=int, default=None)
+    ap.add_argument("--device", default=None)
+    ap.add_argument("--fp16", action=argparse.BooleanOptionalAction, default=None)
     ap.add_argument("--dilate", type=int, default=12, help="запас маски agnostic, пикселей")
     ap.add_argument("--overwrite", action="store_true")
     ap.add_argument("--limit", type=int, default=0)
@@ -233,10 +235,26 @@ def main() -> int:
     config = load_config(args.config)
     paths = load_paths(config)
 
+    compute = config.get("compute", {})
+    if args.device is None:
+        args.device = compute.get("device", "cuda")
+    if args.batch_size is None:
+        args.batch_size = compute.get("batch_size", 8)
+    if args.fp16 is None:
+        args.fp16 = bool(compute.get("fp16", False))
+    print(f"устройство: {args.device}   батч: {args.batch_size}   fp16: {args.fp16}")
+
     try:
         root = paths.preproc_root
     except RuntimeError as exc:
         print(f"ОШИБКА: {exc}", file=sys.stderr)
+        return 2
+    # Опечатка в пути (лишний пробел в export) превращает preproc_root в корень
+    # репозитория, и стадии рассыпают каталоги поверх исходников.
+    if (root / ".git").exists():
+        print(f"ОШИБКА: preproc_root указывает на репозиторий ({root}).\n"
+              f"Похоже на опечатку в пути — проверь, нет ли лишнего пробела в export.",
+              file=sys.stderr)
         return 2
     root.mkdir(parents=True, exist_ok=True)
 

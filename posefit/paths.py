@@ -1,9 +1,8 @@
 """Разрешение путей проекта.
 
-raw_root и cache_root живут локально. preproc_root (поза, parsing, DensePose,
-латенты) на порядок тяжелее и предназначен для GPU-машины, поэтому может быть
-не задан: обращение к нему до настройки падает с внятной ошибкой, а не пишет
-120 ГБ на системный диск.
+raw_root и cache_root живут локально. preproc_root (поза, parsing, маски,
+латенты) заполняется на GPU-машине и может быть не задан: обращение к нему
+до настройки падает с внятной ошибкой, а не пишет данные наугад.
 """
 
 from __future__ import annotations
@@ -29,8 +28,8 @@ class Paths:
         if self._preproc_root is None:
             raise RuntimeError(
                 "preproc_root не задан. Укажи paths.preproc_root в configs/data.yaml "
-                "или переменную окружения POSEFIT_PREPROC_ROOT — это каталог на "
-                "80–120 ГБ, ему не место на системном диске."
+                "или переменную окружения POSEFIT_PREPROC_ROOT — каталог для "
+                "результатов препроцессинга, нужно 5–10 ГБ."
             )
         return self._preproc_root
 

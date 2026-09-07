@@ -157,7 +157,7 @@ def check_data(config_path: Path) -> None:
     target = paths._preproc_root or Path.cwd()
     probe = target if target.exists() else Path.cwd()
     usage = shutil.disk_usage(probe)
-    line("свободно на диске", f"{usage.free / 1024**3:.0f} ГБ  (нужно 80–120 ГБ)")
+    line("свободно на диске", f"{usage.free / 1024**3:.0f} ГБ  (препроцессингу нужно 5–10 ГБ)")
 
 
 def main() -> int:
