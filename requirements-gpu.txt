@@ -1,11 +1,9 @@
-# GPU-этап: поза, human parsing, DensePose, VAE-латенты.
-# Ставится на машине с CUDA, не на ноутбуке. Версии зафиксировать
-# после выбора железа — см. раздел "Что дальше" в README.
+# GPU-этап: детекция, поза, human parsing, VAE-латенты.
+# Ставится на машине с CUDA. torch НЕ пинится здесь: колесо зависит от версии
+# CUDA — ставится отдельно по инструкции с pytorch.org, см. README.
 -r requirements.txt
-# torch
-# torchvision
-# transformers
-# diffusers
-# accelerate
-# mmpose        # RTMPose
-# detectron2    # DensePose
+transformers>=4.47
+diffusers>=0.31
+accelerate>=1.0
+safetensors>=0.4
+huggingface-hub>=0.26
