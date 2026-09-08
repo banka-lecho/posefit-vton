@@ -30,6 +30,10 @@ def fetch(kind: str, repo: str) -> bool:
             from transformers import AutoProcessor, VitPoseForPoseEstimation
             AutoProcessor.from_pretrained(repo)
             VitPoseForPoseEstimation.from_pretrained(repo)
+        elif kind == "embed":
+            from transformers import AutoImageProcessor, AutoModel
+            AutoImageProcessor.from_pretrained(repo)
+            AutoModel.from_pretrained(repo)
         elif kind == "parse":
             from transformers import SegformerForSemanticSegmentation, SegformerImageProcessor
             SegformerImageProcessor.from_pretrained(repo)

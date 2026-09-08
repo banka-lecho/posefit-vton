@@ -25,3 +25,16 @@ def test_image_order_handles_both_naming_schemes():
     names = ["10_fs.webp", "fs.webp", "2_fs.webp"]
     ordered = sorted((Path(n) for n in names), key=image_sort_key)
     assert [p.name for p in ordered] == ["fs.webp", "2_fs.webp", "10_fs.webp"]
+
+
+def test_rel_posix_normalises_to_nfc():
+    import unicodedata
+
+    from posefit.catalog import rel_posix
+
+    # macOS отдаёт 'й' разложенным; хэш от такого пути отличался бы от
+    # линуксового, и препроцессинг с сервера не нашёлся бы локально.
+    decomposed = unicodedata.normalize("NFD", "Джинсы с высокой посадкой/1.webp")
+    got = rel_posix(Path("/data") / decomposed, Path("/data"))
+    assert got == unicodedata.normalize("NFC", "Джинсы с высокой посадкой/1.webp")
+    assert unicodedata.normalize("NFC", got) == got

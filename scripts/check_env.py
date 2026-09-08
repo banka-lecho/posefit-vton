@@ -25,7 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 PACKAGES = [
     "numpy", "pandas", "pyarrow", "cv2", "PIL", "yaml", "tqdm",
-    "torch", "torchvision", "onnxruntime", "transformers", "diffusers", "accelerate",
+    "torch", "torchvision", "onnxruntime", "transformers", "diffusers", "accelerate", "scipy",
 ]
 
 

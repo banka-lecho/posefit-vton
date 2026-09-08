@@ -25,8 +25,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from posefit.paths import DEFAULT_CONFIG, load_config, load_paths  # noqa: E402
 from posefit.preprocess import (  # noqa: E402
-    MODELS, STAGES, TARGET_SIZE, build_agnostic, output_path, pending,
-    working_set, write_json,
+    MODELS, STAGES, TARGET_SIZE, build_agnostic, garment_crop, output_path,
+    pending, working_set, write_json,
 )
 
 COCO_KEYPOINTS = [
@@ -185,6 +185,58 @@ def run_agnostic(rows, paths, args) -> None:
     _report_missing(missing, len(rows), "parse")
 
 
+def run_embed(rows, paths, args) -> None:
+    """Эмбеддинг DINOv2 для кропа вещи по маске parse.
+
+    Нужен, чтобы отличить отзыв на ту же вещь от отзыва на другую расцветку:
+    цветовые гистограммы дают AUC около 0.80, эмбеддинг видит ещё принт
+    и фактуру.
+    """
+    import torch
+    from transformers import AutoImageProcessor, AutoModel
+
+    proc = AutoImageProcessor.from_pretrained(MODELS["embed"])
+    model = AutoModel.from_pretrained(MODELS["embed"]).to(args.device).eval()
+    if args.fp16:
+        model = model.half()
+
+    missing = 0
+    for batch in tqdm(list(_batches(rows, args.batch_size)), desc="embed", unit="batch"):
+        crops, targets = [], []
+        for row in batch.itertuples():
+            parse_path = output_path(paths.preproc_root, "parse", row.sku_id, row.image_id)
+            if not parse_path.exists():
+                missing += 1
+                continue
+            parse = np.array(Image.open(parse_path))
+            image = np.asarray(load_canonical(paths.raw_root / row.rel_path))
+            crop = garment_crop(image, parse, row.category_group)
+            target = output_path(paths.preproc_root, "embed", row.sku_id, row.image_id)
+            if crop is None:
+                # Вещь не найдена на кадре: пустой вектор отличим от нулевого
+                # сходства и не даёт молча считать такой кадр совпавшим.
+                target.parent.mkdir(parents=True, exist_ok=True)
+                np.save(target, np.zeros(0, dtype=np.float16))
+                continue
+            crops.append(Image.fromarray(crop))
+            targets.append(target)
+
+        if not crops:
+            continue
+        inputs = proc(images=crops, return_tensors="pt").to(args.device)
+        if args.fp16:
+            inputs["pixel_values"] = inputs["pixel_values"].half()
+        with torch.no_grad():
+            out = model(**inputs).last_hidden_state[:, 0]  # CLS-токен
+        out = torch.nn.functional.normalize(out, dim=-1).cpu().numpy().astype(np.float16)
+
+        for target, vector in zip(targets, out):
+            target.parent.mkdir(parents=True, exist_ok=True)
+            np.save(target, vector)
+
+    _report_missing(missing, len(rows), "parse")
+
+
 def run_latents(rows, paths, args) -> None:
     import torch
     from diffusers import AutoencoderKL
@@ -210,7 +262,7 @@ def run_latents(rows, paths, args) -> None:
 
 RUNNERS = {
     "detect": run_detect, "parse": run_parse, "pose": run_pose,
-    "agnostic": run_agnostic, "latents": run_latents,
+    "agnostic": run_agnostic, "embed": run_embed, "latents": run_latents,
 }
 
 

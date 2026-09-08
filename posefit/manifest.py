@@ -23,6 +23,7 @@ from .catalog import (
     design_id,
     image_sort_key,
     parse_info_csv,
+    rel_posix,
     split_variant,
 )
 
@@ -46,7 +47,7 @@ def iter_sku_dirs(raw_root: Path, layout: dict) -> list[Path]:
 def _probe(args: tuple[Path, Path]) -> dict:
     path, raw_root = args
     row = {
-        "rel_path": path.relative_to(raw_root).as_posix(),
+        "rel_path": rel_posix(path, raw_root),
         "width": -1,
         "height": -1,
         "file_size": -1,
@@ -74,7 +75,7 @@ def build(raw_root: Path, config: dict, workers: int = 8) -> tuple[pd.DataFrame,
     for sku_dir in tqdm(iter_sku_dirs(raw_root, layout), desc="SKU", unit="sku"):
         folder = sku_dir.name
         category_raw = sku_dir.parent.name
-        rel = sku_dir.relative_to(raw_root).as_posix()
+        rel = rel_posix(sku_dir, raw_root)
         sku_id = _short_id(rel)
         base, variant_no = split_variant(folder)
         info = parse_info_csv(sku_dir / layout["info_file"])
@@ -87,7 +88,7 @@ def build(raw_root: Path, config: dict, workers: int = 8) -> tuple[pd.DataFrame,
             )
             counts[branch] = len(files)
             for order_idx, path in enumerate(files):
-                key = path.relative_to(raw_root).as_posix()
+                key = rel_posix(path, raw_root)
                 image_meta[key] = {
                     "image_id": _short_id(key),
                     "sku_id": sku_id,

@@ -43,7 +43,17 @@ MODELS = {
     "detect": "PekingU/rtdetr_r50vd_coco_o365",
     "pose": "usyd-community/vitpose-base-simple",
     "parse": "mattmdjaga/segformer_b2_clothes",
+    "embed": "facebook/dinov2-base",
     "vae": "stabilityai/sd-vae-ft-mse",
+}
+
+# Классы ATR, образующие саму примеряемую вещь (без рук и шеи, в отличие от
+# AGNOSTIC_LABELS): по ним вырезается кроп для эмбеддинга.
+GARMENT_LABELS = {
+    "upper": ["upper_clothes"],
+    "outer": ["upper_clothes", "dress"],
+    "dress": ["dress", "upper_clothes"],
+    "lower": ["pants", "skirt"],
 }
 
 TARGET_SIZE = (768, 1024)  # ширина, высота — формат VITON-HD
@@ -63,6 +73,7 @@ STAGES = {
         Stage("parse", "png"),
         Stage("pose", "json", needs=("detect",)),
         Stage("agnostic", "png", needs=("parse",)),
+        Stage("embed", "npy", needs=("parse",)),
         # Латенты обычного кадра. Латенты замаскированного кадра зависят от
         # соглашения о маскировании в выбранной архитектуре, поэтому считаются
         # позже, когда бэкбон определён.
@@ -139,6 +150,33 @@ def build_agnostic(parse: np.ndarray, group: str, dilate_px: int = 12) -> np.nda
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (dilate_px, dilate_px))
         mask = cv2.dilate(mask, kernel)
     return mask
+
+
+def garment_crop(
+    image: np.ndarray,
+    parse: np.ndarray,
+    group: str,
+    min_px: int = 500,
+    pad: int = 8,
+    fill: int = 128,
+):
+    """Кроп по маске вещи; всё, что не вещь, заливается нейтральным серым.
+
+    Заливка обязательна: без неё эмбеддинг вбирает кожу, фон и обстановку
+    комнаты, и сравнение отзыва со студийной карточкой меряет разницу
+    интерьеров, а не расцветки.
+    """
+    mask = np.isin(parse, [ATR[name] for name in GARMENT_LABELS[group]])
+    if mask.sum() < min_px:
+        return None
+
+    ys, xs = np.nonzero(mask)
+    y0, y1 = max(0, ys.min() - pad), min(parse.shape[0], ys.max() + pad + 1)
+    x0, x1 = max(0, xs.min() - pad), min(parse.shape[1], xs.max() + pad + 1)
+
+    crop = image[y0:y1, x0:x1].copy()
+    crop[~mask[y0:y1, x0:x1]] = fill
+    return crop
 
 
 def torso_visible(keypoints: dict, min_score: float = 0.3) -> bool:

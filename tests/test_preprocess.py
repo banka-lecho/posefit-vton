@@ -100,3 +100,51 @@ def test_torso_visibility_needs_shoulders_and_hips():
 def test_stage_dependencies_reference_real_stages():
     for stage in STAGES.values():
         assert all(need in STAGES for need in stage.needs)
+
+
+def test_garment_crop_masks_out_everything_but_the_garment():
+    from posefit.preprocess import garment_crop
+
+    parse = np.zeros((64, 64), np.uint8)
+    parse[20:40, 20:40] = ATR["upper_clothes"]
+    parse[45:60, 10:30] = ATR["pants"]
+    image = np.full((64, 64, 3), 200, np.uint8)
+    image[20:40, 20:40] = (10, 20, 30)
+
+    crop = garment_crop(image, parse, "upper", min_px=100, pad=0)
+    assert crop.shape[:2] == (20, 20)
+    assert (crop == (10, 20, 30)).all()
+
+
+def test_garment_crop_uses_the_group_specific_labels():
+    from posefit.preprocess import garment_crop
+
+    parse = np.zeros((64, 64), np.uint8)
+    parse[10:20, 10:20] = ATR["upper_clothes"]
+    parse[40:60, 20:44] = ATR["pants"]
+    image = np.full((64, 64, 3), 90, np.uint8)
+
+    assert garment_crop(image, parse, "lower", min_px=100, pad=0).shape[:2] == (20, 24)
+    assert garment_crop(image, parse, "upper", min_px=50, pad=0).shape[:2] == (10, 10)
+
+
+def test_garment_crop_returns_none_when_the_garment_is_absent():
+    from posefit.preprocess import garment_crop
+
+    parse = np.zeros((64, 64), np.uint8)
+    image = np.zeros((64, 64, 3), np.uint8)
+    assert garment_crop(image, parse, "upper") is None
+
+
+def test_garment_crop_fills_non_garment_pixels_inside_the_box():
+    from posefit.preprocess import garment_crop
+
+    # Диагональная вещь: углы бокса к ней не относятся и обязаны быть залиты,
+    # иначе в эмбеддинг попадёт фон примерочной.
+    parse = np.zeros((32, 32), np.uint8)
+    for i in range(8, 24):
+        parse[i, i] = ATR["dress"]
+    image = np.full((32, 32, 3), 7, np.uint8)
+    crop = garment_crop(image, parse, "dress", min_px=8, pad=0, fill=128)
+    assert (crop[0, -1] == 128).all()
+    assert (crop[0, 0] == 7).all()
