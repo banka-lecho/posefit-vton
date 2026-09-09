@@ -84,3 +84,40 @@ def test_only_self_attention_is_trainable():
 def test_missing_attention_layers_are_reported():
     with pytest.raises(RuntimeError, match="attn1"):
         freeze_except_self_attention(torch.nn.Linear(4, 4))
+
+
+def test_masked_mse_ignores_everything_outside_the_mask():
+    from posefit.model import masked_mse
+
+    error = torch.zeros(1, 4, 8, 6)
+    error[..., 0:2] = 9.0      # внутри маски
+    error[..., 2:] = 100.0     # снаружи — учитываться не должно
+    mask_latent = torch.zeros(1, 1, 8, 12)
+    mask_latent[..., 0:2] = 1.0
+    assert torch.allclose(masked_mse(error, mask_latent), torch.tensor(9.0))
+
+
+def test_masked_mse_averages_over_masked_cells_and_channels():
+    from posefit.model import masked_mse
+
+    error = torch.ones(1, 4, 8, 6) * 2.0
+    mask_latent = torch.zeros(1, 1, 8, 12)
+    mask_latent[..., 0:3] = 1.0
+    assert torch.allclose(masked_mse(error, mask_latent), torch.tensor(2.0))
+
+
+def test_masked_mse_survives_an_empty_mask():
+    from posefit.model import masked_mse
+
+    # Кадр, где human parsing не нашёл вещь: делить на ноль нельзя.
+    error = torch.ones(1, 4, 8, 6)
+    assert torch.isfinite(masked_mse(error, torch.zeros(1, 1, 8, 12)))
+
+
+def test_masked_mse_uses_only_the_person_half_of_the_mask():
+    from posefit.model import masked_mse
+
+    error = torch.ones(1, 4, 8, 6)
+    mask_latent = torch.zeros(1, 1, 8, 12)
+    mask_latent[..., 6:] = 1.0   # правая половина — вещь-эталон
+    assert torch.allclose(masked_mse(error, mask_latent), torch.tensor(0.0))

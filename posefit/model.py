@@ -62,6 +62,19 @@ def count_parameters(parameters) -> int:
     return sum(p.numel() for p in parameters)
 
 
+def masked_mse(error: torch.Tensor, mask_latent: torch.Tensor) -> torch.Tensor:
+    """Средняя ошибка внутри маски — то, чему модель действительно учится.
+
+    Вне маски UNet видит чистый латент во входных каналах и восстанавливает шум
+    точно, поэтому общая ошибка на четыре пятых состоит из нулей и почти не
+    двигается за прогон. Диагностическая величина, в обратном проходе не участвует.
+    """
+    half = error.shape[-1]
+    inside = mask_latent[..., :half].to(error.dtype)
+    weight = inside.sum() * error.shape[1]
+    return (error * inside).sum() / weight.clamp(min=1.0)
+
+
 def encode(vae, images: torch.Tensor) -> torch.Tensor:
     """Изображения из [-1,1] в латенты."""
     latents = vae.encode(images).latent_dist.sample()

@@ -157,7 +157,7 @@ def main() -> int:
     from posefit.dataset import VTONPairs
     from posefit.model import (
         BACKBONE, build_inputs, count_parameters, empty_conditioning, encode,
-        load_component,
+        load_component, masked_mse,
         freeze_except_self_attention, unet_input,
     )
 
@@ -237,9 +237,16 @@ def main() -> int:
                 # Потери считаются только на половине с человеком: правая
                 # половина — вход-эталон, восстанавливать её незачем.
                 half = target.shape[-1] // 2
-                loss = torch.nn.functional.mse_loss(
-                    predicted[..., :half].float(), noise[..., :half].float()
-                ) / accumulate
+                error = (predicted[..., :half].float() - noise[..., :half].float()) ** 2
+                loss = error.mean() / accumulate
+
+            # Диагностика, в обучении не участвует. Вне маски модель видит
+            # чистый латент во входных каналах и восстанавливает шум точно,
+            # поэтому общая ошибка на четыре пятых состоит из нулей и почти
+            # не меняется. Учится модель ровно внутри маски — и смотреть надо
+            # на эту величину.
+            with torch.no_grad():
+                masked_loss = masked_mse(error.detach(), mask_latent)
 
             scaler.scale(loss).backward()
             if (step + 1) % accumulate == 0:
@@ -254,9 +261,11 @@ def main() -> int:
             progress.update(1)
             if step % hp.get("log_every", 50) == 0:
                 record = {"step": step, "loss": loss.detach().item() * accumulate,
+                          "loss_masked": masked_loss.item(),
                           "lr": scheduler.get_last_lr()[0],
                           "hours": round((time.time() - started) / 3600, 3)}
-                progress.set_postfix(loss=f"{record['loss']:.4f}")
+                progress.set_postfix(loss=f"{record['loss']:.4f}",
+                                     masked=f"{record['loss_masked']:.4f}")
                 with log_path.open("a", encoding="utf-8") as fh:
                     fh.write(json.dumps(record) + "\n")
             if step % hp.get("save_every", 1000) == 0:
