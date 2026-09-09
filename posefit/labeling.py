@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import io
 import json
 from dataclasses import dataclass
@@ -54,7 +55,19 @@ WILD = Task(
     paired=True,
 )
 
-TASKS = {t.name: t for t in (GARMENT, WILD)}
+VERIFY = Task(
+    name="verify",
+    title="Проверка пары для тестового набора",
+    hint="Слева человек, справа вещь из карточки. Отмечай только бесспорно верные пары.",
+    classes=[
+        ("ok", "пара верная"),
+        ("wrong_colour", "расцветка не та"),
+        ("not_visible", "вещь не видна или не надета"),
+    ],
+    paired=True,
+)
+
+TASKS = {t.name: t for t in (GARMENT, WILD, VERIFY)}
 
 
 def sample(pool: pd.DataFrame, n: int, seed: int, strata: str = "category_group") -> pd.DataFrame:
@@ -93,12 +106,28 @@ def build_items(rows: pd.DataFrame, raw_root: Path, task: Task) -> list[dict]:
     return items
 
 
+def batch_id(items: list[dict]) -> str:
+    """Отпечаток состава партии.
+
+    Партии одной задачи обязаны различаться именем файла, ключом в localStorage
+    и именем выгружаемого CSV. Иначе вторая партия открывается под теми же
+    именами, что и первая, и выгрузка молча отдаёт чужие метки — так уже
+    случилось и стоило часа ручной работы.
+    """
+    joined = "\n".join(sorted(item["image_id"] for item in items))
+    return hashlib.blake2b(joined.encode("utf-8"), digest_size=4).hexdigest()
+
+
 def render(task: Task, items: list[dict]) -> str:
-    payload = json.dumps({"task": task.name, "classes": task.classes, "items": items},
-                         ensure_ascii=False)
+    batch = batch_id(items)
+    payload = json.dumps(
+        {"task": task.name, "batch": batch, "classes": task.classes, "items": items},
+        ensure_ascii=False,
+    )
     keys = " ".join(f"<kbd>{i + 1}</kbd> {label}" for i, (_, label) in enumerate(task.classes))
     return _TEMPLATE.replace("__TITLE__", task.title).replace("__HINT__", task.hint) \
-                    .replace("__KEYS__", keys).replace("__PAYLOAD__", payload)
+                    .replace("__KEYS__", keys).replace("__BATCH__", batch) \
+                    .replace("__PAYLOAD__", payload)
 
 
 _TEMPLATE = r"""<!doctype html>
@@ -114,6 +143,8 @@ _TEMPLATE = r"""<!doctype html>
   header { padding:12px 20px; border-bottom:1px solid var(--line); }
   h1 { font-size:16px; margin:0 0 4px; }
   .hint, .keys { color:var(--mut); font-size:13px; }
+  .batch { color:var(--mut); font-weight:400; font-size:12px;
+           font-family:ui-monospace,monospace; }
   kbd { border:1px solid var(--line); border-radius:4px; padding:1px 5px;
         font:12px ui-monospace,monospace; margin-left:8px; }
   main { display:flex; gap:24px; justify-content:center; align-items:flex-start;
@@ -134,7 +165,7 @@ _TEMPLATE = r"""<!doctype html>
           word-break:break-all; max-width:60ch; margin:0 auto; }
 </style>
 <header>
-  <h1>__TITLE__</h1>
+  <h1>__TITLE__ <span class="batch">партия __BATCH__</span></h1>
   <div class="hint">__HINT__</div>
   <div class="keys">__KEYS__ &nbsp;·&nbsp; <kbd>←</kbd> назад <kbd>→</kbd> вперёд</div>
 </header>
@@ -149,7 +180,8 @@ _TEMPLATE = r"""<!doctype html>
 <script id="data" type="application/json">__PAYLOAD__</script>
 <script>
 const DATA = JSON.parse(document.getElementById("data").textContent);
-const KEY = "posefit-labels-" + DATA.task;
+// Ключ включает отпечаток партии: метки разных партий не смешиваются.
+const KEY = "posefit-labels-" + DATA.task + "-" + DATA.batch;
 let labels = {};
 try { labels = JSON.parse(localStorage.getItem(KEY) || "{}"); } catch (e) { labels = {}; }
 let i = 0;
@@ -215,16 +247,20 @@ document.addEventListener("keydown", (e) => {
 });
 
 document.getElementById("save").onclick = () => {
-  const rows = [["image_id", "rel_path", "category_group", "label"]];
+  const rows = [["image_id", "rel_path", "category_group", "label", "batch"]];
   DATA.items.forEach((it) => {
     if (labels[it.image_id]) {
-      rows.push([it.image_id, it.rel_path, it.category, labels[it.image_id]]);
+      rows.push([it.image_id, it.rel_path, it.category, labels[it.image_id], DATA.batch]);
     }
   });
+  if (rows.length === 1) {
+    alert("Ничего не размечено — выгружать нечего.");
+    return;
+  }
   const csv = rows.map((r) => r.map((v) => `"${String(v).replace(/"/g, '""')}"`).join(",")).join("\n");
   const a = document.createElement("a");
   a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
-  a.download = "labels_" + DATA.task + ".csv";
+  a.download = "labels_" + DATA.task + "_" + DATA.batch + ".csv";
   a.click();
 };
 

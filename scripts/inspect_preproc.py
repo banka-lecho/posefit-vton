@@ -23,10 +23,8 @@ from PIL import Image, ImageDraw
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from posefit.paths import DEFAULT_CONFIG, load_config, load_paths  # noqa: E402
-from posefit.preprocess import output_path, working_set  # noqa: E402
+from posefit.preprocess import load_canonical, output_path, working_set  # noqa: E402
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from preprocess import load_canonical  # noqa: E402
 
 SKELETON = [
     ("left_shoulder", "right_shoulder"), ("left_shoulder", "left_elbow"),

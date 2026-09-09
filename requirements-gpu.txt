@@ -10,3 +10,5 @@ huggingface-hub>=0.26
 # ViTPose режет кроп по боксу аффинным преобразованием через scipy. Без него
 # transformers падает не проверкой зависимости, а NameError внутри себя.
 scipy>=1.11
+# Метрики оценки: SSIM, LPIPS, FID.
+torchmetrics[image]>=1.4

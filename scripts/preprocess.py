@@ -25,8 +25,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from posefit.paths import DEFAULT_CONFIG, load_config, load_paths  # noqa: E402
 from posefit.preprocess import (  # noqa: E402
-    MODELS, STAGES, TARGET_SIZE, build_agnostic, garment_crop, output_path,
-    pending, working_set, write_json,
+    MODELS, STAGES, TARGET_SIZE, build_agnostic, garment_crop, load_canonical,
+    output_path, pending, working_set, write_json,
 )
 
 COCO_KEYPOINTS = [
@@ -35,23 +35,6 @@ COCO_KEYPOINTS = [
     "left_wrist", "right_wrist", "left_hip", "right_hip",
     "left_knee", "right_knee", "left_ankle", "right_ankle",
 ]
-
-
-def load_canonical(path: Path) -> Image.Image:
-    """Кадр, приведённый к 768x1024 с сохранением пропорций и паддингом.
-
-    Пропорции у отзывов гуляют (от 450x1000 до 1000x750), и растягивание
-    исказило бы силуэт — а именно его модель и учится воспроизводить.
-    """
-    image = Image.open(path).convert("RGB")
-    target_w, target_h = TARGET_SIZE
-    scale = min(target_w / image.width, target_h / image.height)
-    resized = image.resize((max(1, round(image.width * scale)),
-                            max(1, round(image.height * scale))), Image.LANCZOS)
-    canvas = Image.new("RGB", TARGET_SIZE, (255, 255, 255))
-    canvas.paste(resized, ((target_w - resized.width) // 2,
-                           (target_h - resized.height) // 2))
-    return canvas
 
 
 def _report_missing(missing: int, total: int, upstream: str) -> None:

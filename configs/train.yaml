@@ -1,0 +1,30 @@
+# Гиперпараметры одинаковы для всех трёх конфигураций: сравнивается состав
+# данных, поэтому всё остальное обязано совпадать.
+seed: 0
+device: cuda:1
+fp16: true
+# VAE отдельно: в fp16 он у SD 1.5 даёт NaN на части кадров.
+vae_fp16: false
+
+# 512x384 — рабочее разрешение CatVTON. Финальные прогоны можно повторить на
+# 1024x768, но отлаживаться на нём слишком дорого.
+height: 512
+width: 384
+
+batch_size: 4
+grad_accum: 2
+workers: 8
+gradient_checkpointing: true
+
+lr: 1.0e-5
+weight_decay: 1.0e-2
+warmup_frac: 0.05
+clip_grad: 1.0
+max_steps: 30000
+
+flip: true
+# Порог расцветки для конфигурации studio_clean: жёстче рабочего 0.45.
+clean_quantile: 0.65
+
+log_every: 50
+save_every: 1000

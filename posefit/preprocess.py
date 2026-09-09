@@ -16,10 +16,11 @@ import hashlib
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Iterable
+from typing import Iterable
 
 import numpy as np
 import pandas as pd
+from PIL import Image
 
 # ATR-18 — разметка, в которой обучен segformer_b2_clothes.
 ATR = {
@@ -74,12 +75,31 @@ STAGES = {
         Stage("pose", "json", needs=("detect",)),
         Stage("agnostic", "png", needs=("parse",)),
         Stage("embed", "npy", needs=("parse",)),
+        Stage("colour", "npy", needs=("parse",)),
         # Латенты обычного кадра. Латенты замаскированного кадра зависят от
         # соглашения о маскировании в выбранной архитектуре, поэтому считаются
         # позже, когда бэкбон определён.
         Stage("latents", "npy"),
     )
 }
+
+
+def load_canonical(path: Path, size: tuple[int, int] = TARGET_SIZE) -> Image.Image:
+    """Кадр, приведённый к целевому размеру с сохранением пропорций и паддингом.
+
+    Пропорции у отзывов гуляют от 450x1000 до 1000x750, и растягивание исказило
+    бы силуэт — а именно его модель и учится воспроизводить. Все стадии
+    препроцессинга считались через эту же функцию, поэтому маски и позы
+    совмещаются с кадром пиксель в пиксель.
+    """
+    image = Image.open(path).convert("RGB")
+    target_w, target_h = size
+    scale = min(target_w / image.width, target_h / image.height)
+    resized = image.resize((max(1, round(image.width * scale)),
+                            max(1, round(image.height * scale))), Image.LANCZOS)
+    canvas = Image.new("RGB", size, (255, 255, 255))
+    canvas.paste(resized, ((target_w - resized.width) // 2, (target_h - resized.height) // 2))
+    return canvas
 
 
 def output_path(root: Path, stage: str, sku_id: str, image_id: str) -> Path:

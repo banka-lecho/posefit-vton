@@ -34,3 +34,24 @@ def test_class_codes_are_unique_per_task():
     for task in TASKS.values():
         codes = [c for c, _ in task.classes]
         assert len(codes) == len(set(codes))
+
+
+def test_batch_id_depends_only_on_the_frames():
+    from posefit.labeling import batch_id
+
+    a = [{"image_id": "x"}, {"image_id": "y"}]
+    assert batch_id(a) == batch_id(list(reversed(a)))
+    assert batch_id(a) != batch_id([{"image_id": "x"}, {"image_id": "z"}])
+
+
+def test_render_isolates_storage_and_download_per_batch():
+    from posefit.labeling import TASKS, batch_id, render
+
+    task = TASKS["verify"]
+    first = [{"image_id": "a", "rel_path": "p/a.webp", "category": "upper",
+              "thumb": "", "ref_path": "p/r.webp", "ref_thumb": ""}]
+    second = [dict(first[0], image_id="b")]
+    html_a, html_b = render(task, first), render(task, second)
+    assert batch_id(first) in html_a and batch_id(second) in html_b
+    # Разные партии не должны делить ни ключ хранилища, ни имя выгрузки.
+    assert batch_id(first) not in html_b

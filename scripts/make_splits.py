@@ -13,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from posefit.dedup import annotate, design_components  # noqa: E402
 from posefit.paths import DEFAULT_CONFIG, load_config, load_paths  # noqa: E402
-from posefit.splits import assign, check_leakage, write  # noqa: E402
+from posefit.splits import RATIOS, assign, check_leakage, write  # noqa: E402
 
 TARGET_GROUPS = ("upper", "lower", "dress", "outer")
 
@@ -53,7 +53,7 @@ def main() -> int:
     annotated[keep].to_parquet(paths.manifest_images, index=False)
     write(paths.splits, groups, args.seed, leakage)
 
-    print(f"групп кроёв: {len(groups)}  seed={args.seed}  -> {paths.splits}")
+    print(f"групп кроёв: {len(groups)}  seed={args.seed}  доли={RATIOS}  -> {paths.splits}")
     print("\nSKU по сплитам и группам одежды:")
     table = sku[sku["category_group"].isin(TARGET_GROUPS)]
     print(pd.crosstab(table["category_group"], table["split"]).to_string())
