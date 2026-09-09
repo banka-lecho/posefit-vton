@@ -109,8 +109,8 @@ def main() -> int:
     )
 
     vae_dtype = torch.float16 if hp.get("vae_fp16", False) else torch.float32
-    vae = AutoencoderKL.from_pretrained(BACKBONE, subfolder="vae").to(device, vae_dtype).eval()
-    unet = UNet2DConditionModel.from_pretrained(BACKBONE, subfolder="unet").to(device, dtype).eval()
+    vae = load_component(AutoencoderKL, "vae").to(device, vae_dtype).eval()
+    unet = load_component(UNet2DConditionModel, "unet").to(device, dtype).eval()
     freeze_except_self_attention(unet)
     state = torch.load(args.run / args.checkpoint, map_location=device)
     unet.load_state_dict({k: v.to(dtype) for k, v in state["unet"].items()}, strict=False)

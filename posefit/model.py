@@ -18,10 +18,26 @@ from __future__ import annotations
 import torch
 import torch.nn.functional as F
 
-BACKBONE = "runwayml/stable-diffusion-inpainting"
+# Официальное зеркало SD 1.5 inpainting. Исходный runwayml/... остался без
+# файлов safetensors, и diffusers молча откатывался на pickle-сериализацию.
+BACKBONE = "stable-diffusion-v1-5/stable-diffusion-inpainting"
 VAE_SCALE = 8
 CROSS_ATTENTION_DIM = 768
 TEXT_TOKENS = 77
+
+
+def load_component(cls, subfolder: str, **kwargs):
+    """Загружает часть бэкбона, предпочитая safetensors.
+
+    У зеркала SD 1.5 inpainting файлы safetensors выложены только в fp16-варианте,
+    и без явного variant diffusers не находит их и молча откатывается на pickle.
+    Веса при этом те же: dtype задаётся отдельно при переносе на устройство.
+    """
+    try:
+        return cls.from_pretrained(BACKBONE, subfolder=subfolder, variant="fp16", **kwargs)
+    except (OSError, ValueError):
+        # Зеркало без fp16-варианта: пусть diffusers выбирает файл сам.
+        return cls.from_pretrained(BACKBONE, subfolder=subfolder, **kwargs)
 
 
 def freeze_except_self_attention(unet) -> list[torch.nn.Parameter]:

@@ -24,6 +24,7 @@ from pathlib import Path
 
 import pandas as pd
 import yaml
+from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -156,6 +157,7 @@ def main() -> int:
     from posefit.dataset import VTONPairs
     from posefit.model import (
         BACKBONE, build_inputs, count_parameters, empty_conditioning, encode,
+        load_component,
         freeze_except_self_attention, unet_input,
     )
 
@@ -171,9 +173,9 @@ def main() -> int:
     # обучение молча портится. Держим его в fp32, память это позволяет —
     # он замороженный и без состояний оптимизатора.
     vae_dtype = torch.float16 if hp.get("vae_fp16", False) else torch.float32
-    vae = AutoencoderKL.from_pretrained(BACKBONE, subfolder="vae").to(device, vae_dtype).eval()
+    vae = load_component(AutoencoderKL, "vae").to(device, vae_dtype).eval()
     vae.requires_grad_(False)
-    unet = UNet2DConditionModel.from_pretrained(BACKBONE, subfolder="unet").to(device)
+    unet = load_component(UNet2DConditionModel, "unet").to(device)
     noise_scheduler = DDPMScheduler.from_pretrained(BACKBONE, subfolder="scheduler")
 
     trainable = freeze_except_self_attention(unet)
@@ -251,7 +253,7 @@ def main() -> int:
             step += 1
             progress.update(1)
             if step % hp.get("log_every", 50) == 0:
-                record = {"step": step, "loss": float(loss) * accumulate,
+                record = {"step": step, "loss": loss.detach().item() * accumulate,
                           "lr": scheduler.get_last_lr()[0],
                           "hours": round((time.time() - started) / 3600, 3)}
                 progress.set_postfix(loss=f"{record['loss']:.4f}")
