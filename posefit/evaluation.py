@@ -17,8 +17,10 @@
 from __future__ import annotations
 
 import hashlib
+from pathlib import Path
 
 import numpy as np
+import yaml
 
 
 def pair_seed(pair_id: str, base: int = 0) -> int:
@@ -86,3 +88,66 @@ def paired_difference(a: np.ndarray, b: np.ndarray, n_boot: int = 5000, seed: in
     except ImportError:
         result["wilcoxon_p"] = float("nan")
     return result
+
+
+# Параметры, которые обязаны совпадать с обучением: модель, обученная на одной
+# маске или разрешении, на другой меряет не себя.
+TRAINED_KEYS = ("mask_stage", "height", "width")
+
+
+def resolve_eval_config(hp: dict, run: Path, checkpoint: str,
+                        mask_stage: str | None = None,
+                        arch: str | None = None) -> tuple[dict, str]:
+    """Гиперпараметры для замера и пояснение, откуда они взяты.
+
+    Обученный прогон — единственный источник правды о том, на чём он учился:
+    маска и разрешение берутся из его снимка train_config.yaml, а текущий
+    configs/train.yaml к моменту замера мог смениться и голоса не имеет.
+    Раньше расхождение с конфигом считалось ошибкой, и замер прогона с
+    уточнённой маской отказывался запускаться.
+
+    Схема (раздел arch) берётся из снимка целиком: чекпоинт содержит веса
+    ровно тех модулей, что были собраны при обучении, и собрать при замере
+    другой набор значит загрузить веса не туда.
+    """
+    hp = dict(hp)
+    snapshot = Path(run) / "train_config.yaml"
+    if checkpoint == "none":
+        if mask_stage:
+            hp["mask_stage"] = mask_stage
+        if arch:
+            hp["arch"] = {**(hp.get("arch") or {}), "name": arch}
+        return hp, "контроль без обучения"
+    if mask_stage or arch:
+        raise ValueError("--mask-stage и --arch допустимы только с --checkpoint none: "
+                         "обученный прогон сам помнит свою маску и схему")
+    if snapshot.exists():
+        trained = yaml.safe_load(snapshot.read_text(encoding="utf-8")) or {}
+        for key in TRAINED_KEYS:
+            if key in trained:
+                hp[key] = trained[key]
+        hp["arch"] = trained.get("arch") or {"name": "catvton"}
+        return hp, f"из снимка {snapshot}"
+    # Прогоны до появления снимков учились на исходной маске по базовой схеме.
+    hp["mask_stage"] = "agnostic"
+    hp["arch"] = {"name": "catvton"}
+    return hp, "снимка нет (старый прогон) — считаю mask_stage=agnostic, схема catvton"
+
+
+def eval_output_dir(run: Path, reliability_token: str = "studio",
+                    reliability_guidance: float = 0.0) -> Path:
+    """Куда писать метрики замера.
+
+    Обычный замер пишет в каталог прогона. Замер с другим токеном надёжности
+    или с guidance — это другой способ вывода той же модели, и его метрики
+    уходят в соседний каталог runs/<прогон>@<вариант>: иначе второй замер
+    молча затёр бы metrics_pairs.csv первого. Соседний каталог compare_runs.py
+    принимает как отдельный прогон.
+    """
+    run = Path(run)
+    tags = []
+    if reliability_token != "studio":
+        tags.append(reliability_token)
+    if reliability_guidance > 0:
+        tags.append(f"g{reliability_guidance:g}")
+    return run if not tags else run.parent / f"{run.name}@{'_'.join(tags)}"

@@ -203,11 +203,13 @@ python scripts/train.py --config-name studio_wild --arch anchor     # runs/studi
 python scripts/evaluate.py --run runs/studio_wild_anchor
 python scripts/evaluate.py --run runs/studio_wild_anchor --reliability-guidance 2
 python scripts/inspect_guide.py --n 6      # контактный лист карт координат
-python scripts/compare_runs.py runs/studio_wild runs/studio_wild_anchor
+python scripts/compare_runs.py runs/studio_wild runs/studio_wild_anchor runs/studio_wild_anchor@g2
 ```
 
 Замер берёт схему из снимка `train_config.yaml` прогона и собирает те же
-модули до загрузки весов. Абляция: `arch.guide`, `arch.reliability`,
+модули до загрузки весов. Замер с guidance или другим токеном — это другой
+способ вывода той же модели: его метрики пишутся в соседний каталог
+`runs/<прогон>@g2` и не затирают обычный замер. Абляция: `arch.guide`, `arch.reliability`,
 `arch.garment_embed` выключаются по одному; главное сравнение —
 `studio_wild_anchor` против `studio_wild` и `studio_clean` на тех же 373 парах.
 

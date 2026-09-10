@@ -45,7 +45,9 @@ from posefit.model import (  # noqa: E402
     BACKBONE, build_guide, build_inputs, build_unet, decode, empty_conditioning, encode,
     load_component, pack_condition, take_person_half, unet_input,
 )
-from posefit.evaluation import mask_bbox, masked_l1, pair_seed  # noqa: E402
+from posefit.evaluation import (  # noqa: E402
+    eval_output_dir, mask_bbox, masked_l1, pair_seed, resolve_eval_config,
+)
 from posefit.paths import DEFAULT_CONFIG, load_config, load_paths  # noqa: E402
 from posefit.reliability import BUCKETS, NULL_TOKEN  # noqa: E402
 
@@ -145,37 +147,27 @@ def main() -> int:
     torch.set_grad_enabled(False)
 
     hp = yaml.safe_load(args.train_config.read_text(encoding="utf-8"))
-    snapshot = args.run / "train_config.yaml"
-    if args.checkpoint == "none":
-        # Контроль без обучения: снимка нет, маску и схему задаёт пользователь.
-        if args.mask_stage:
-            hp["mask_stage"] = args.mask_stage
-        if args.arch:
-            hp["arch"] = {**(hp.get("arch") or {}), "name": args.arch}
-    else:
-        if args.mask_stage or args.arch:
-            raise SystemExit("--mask-stage и --arch допустимы только с --checkpoint none: "
-                             "обученный прогон сам помнит свою маску и схему")
-        if snapshot.exists():
-            # Прогон — единственный источник правды о том, на чём он учился.
-            # Маска, разрешение и схема берутся из снимка; configs/train.yaml
-            # к этому моменту мог смениться и голоса здесь не имеет.
-            trained = yaml.safe_load(snapshot.read_text(encoding="utf-8"))
-            for key in ("mask_stage", "height", "width"):
-                if key in trained:
-                    hp[key] = trained[key]
-            hp["arch"] = trained.get("arch") or {"name": "catvton"}
-        else:
-            print("ВНИМАНИЕ: в прогоне нет train_config.yaml (старый прогон) — "
-                  "считаю, что учился на mask_stage=agnostic по базовой схеме")
-            hp["mask_stage"] = "agnostic"
-            hp["arch"] = {"name": "catvton"}
+    try:
+        hp, source = resolve_eval_config(hp, args.run, args.checkpoint,
+                                         args.mask_stage, args.arch)
+    except ValueError as exc:
+        raise SystemExit(str(exc))
+    print(f"параметры обучения: {source}")
     print(f"маска: {hp.get('mask_stage', 'agnostic')}   разрешение {hp['width']}x{hp['height']}")
     flags = arch_flags(hp)
+    if not uses_condition(flags):
+        # Базовой схеме токен и guidance подать некуда: замер под другим
+        # именем был бы копией обычного.
+        args.reliability_token, args.reliability_guidance = "studio", 0.0
+    elif not flags["reliability"]:
+        args.reliability_guidance = 0.0
     token = BUCKETS.index(args.reliability_token)
+    out_run = eval_output_dir(args.run, args.reliability_token, args.reliability_guidance)
     print(f"архитектура: {flags['name']}"
           + (f"   токен «{args.reliability_token}»   guidance {args.reliability_guidance}"
              if uses_condition(flags) else ""))
+    if out_run != args.run:
+        print(f"метрики -> {out_run} (вариант вывода, каталог прогона не трогаю)")
     paths = load_paths(load_config(args.config))
     device = args.device or hp.get("device", "cuda")
     dtype = torch.float16 if hp.get("fp16", True) else torch.float32
@@ -223,7 +215,7 @@ def main() -> int:
         unet.load_state_dict({k: v.to(dtype) for k, v in state["unet"].items()}, strict=False)
         step = int(state["step"])
         print(f"веса с шага {step} из {args.run / args.checkpoint}")
-    args.run.mkdir(parents=True, exist_ok=True)
+    out_run.mkdir(parents=True, exist_ok=True)
     scheduler = DDIMScheduler.from_pretrained(BACKBONE, subfolder="scheduler")
 
     lpips = LearnedPerceptualImagePatchSimilarity(net_type="alex", normalize=True).to(device)
@@ -233,7 +225,7 @@ def main() -> int:
     kid = KernelInceptionDistance(subset_size=min(100, len(dataset)), normalize=True).to(device)
     rows: list[dict] = []
 
-    out_dir = args.run / "preds"
+    out_dir = out_run / "preds"
     if args.save_images:
         out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -279,10 +271,10 @@ def main() -> int:
                 Image.fromarray(image.transpose(1, 2, 0)).save(out_dir / f"{pair_id}.jpg", quality=95)
 
     per_pair = pd.DataFrame(rows)
-    per_pair.to_csv(args.run / "metrics_pairs.csv", index=False)
+    per_pair.to_csv(out_run / "metrics_pairs.csv", index=False)
     kid_mean, kid_std = kid.compute()
     metrics = {
-        "run": str(args.run), "step": step, "pairs": len(per_pair),
+        "run": str(out_run), "weights": str(args.run), "step": step, "pairs": len(per_pair),
         "steps": args.steps, "seed": args.seed, "arch": flags["name"],
         "reliability_token": args.reliability_token if uses_condition(flags) else None,
         "reliability_guidance": args.reliability_guidance if flags["reliability"] else None,
@@ -293,7 +285,7 @@ def main() -> int:
         "kid": float(kid_mean), "kid_std": float(kid_std),
         "fid": float(fid.compute()),
     }
-    (args.run / "metrics.json").write_text(json.dumps(metrics, ensure_ascii=False, indent=2),
+    (out_run / "metrics.json").write_text(json.dumps(metrics, ensure_ascii=False, indent=2),
                                            encoding="utf-8")
     print(json.dumps(metrics, ensure_ascii=False, indent=2))
     return 0
