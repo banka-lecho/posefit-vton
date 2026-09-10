@@ -17,6 +17,11 @@
 парную значимость.
 
     python scripts/evaluate.py --run runs/zero_shot --checkpoint none   # без обучения
+
+Архитектура берётся из снимка train_config.yaml прогона: расширенный conv_in и
+глобальное условие якорной схемы должны быть собраны до загрузки весов.
+Для якорной схемы на выводе подаётся токен «студия»; --reliability-guidance
+включает второй проход с токеном «неизвестно» и шаг от него к «студии».
 """
 
 from __future__ import annotations
@@ -34,13 +39,15 @@ from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from posefit.arch import ARCH_NAMES, arch_flags, uses_condition  # noqa: E402
 from posefit.dataset import VTONPairs  # noqa: E402
 from posefit.model import (  # noqa: E402
-    BACKBONE, build_inputs, decode, empty_conditioning, encode,
-    load_component, take_person_half, unet_input,
+    BACKBONE, build_guide, build_inputs, build_unet, decode, empty_conditioning, encode,
+    load_component, pack_condition, take_person_half, unet_input,
 )
 from posefit.evaluation import mask_bbox, masked_l1, pair_seed  # noqa: E402
 from posefit.paths import DEFAULT_CONFIG, load_config, load_paths  # noqa: E402
+from posefit.reliability import BUCKETS, NULL_TOKEN  # noqa: E402
 
 
 def to_uint8(images: torch.Tensor) -> torch.Tensor:
@@ -63,7 +70,9 @@ def initial_noise(shape, pair_ids, base_seed: int, device, dtype) -> torch.Tenso
 
 @torch.no_grad()
 def generate(unet, vae, scheduler, batch, device, dtype, vae_dtype, steps: int,
-             base_seed: int = 0) -> torch.Tensor:
+             base_seed: int = 0, flags: dict | None = None, token: int = 0,
+             guidance: float = 0.0) -> torch.Tensor:
+    flags = flags or {}
     person = batch["person"].to(device, vae_dtype)
     garment = batch["garment"].to(device, vae_dtype)
     mask = batch["mask"].to(device, dtype)
@@ -77,12 +86,30 @@ def generate(unet, vae, scheduler, batch, device, dtype, vae_dtype, steps: int,
     latents = latents * scheduler.init_noise_sigma
     conditioning = empty_conditioning(latents.shape[0], device, dtype)
 
+    # Дополнения якорной схемы; для базовой всё остаётся None.
+    guide = None
+    if flags.get("guide"):
+        guide = build_guide(batch["guide_person"].to(device), batch["guide_garment"].to(device),
+                            masked_latent.shape[-2:]).to(dtype)
+    condition = null_condition = None
+    if uses_condition(flags):
+        ids = torch.full((latents.shape[0],), token, device=device, dtype=torch.long)
+        embed = batch["garment_embed"].to(device) if flags.get("garment_embed") else None
+        condition = pack_condition(ids, embed)
+        if guidance > 0 and flags.get("reliability"):
+            # Второй проход с токеном «неизвестно»: guidance по надёжности —
+            # шаг от пары неизвестного качества к студийной, по образцу CFG.
+            null_condition = pack_condition(torch.full_like(ids, NULL_TOKEN), embed)
+
     for t in scheduler.timesteps:
-        model_input = scheduler.scale_model_input(latents, t)
-        noise_pred = unet(
-            unet_input(model_input, mask_latent, masked_latent), t,
-            encoder_hidden_states=conditioning,
-        ).sample
+        model_input = unet_input(scheduler.scale_model_input(latents, t),
+                                 mask_latent, masked_latent, guide)
+        noise_pred = unet(model_input, t, encoder_hidden_states=conditioning,
+                          class_labels=condition).sample
+        if null_condition is not None:
+            noise_null = unet(model_input, t, encoder_hidden_states=conditioning,
+                              class_labels=null_condition).sample
+            noise_pred = noise_null + guidance * (noise_pred - noise_null)
         latents = scheduler.step(noise_pred, t, latents).prev_sample
 
     return decode(vae, take_person_half(latents).to(vae_dtype))
@@ -98,6 +125,13 @@ def main() -> int:
                     help="только для --checkpoint none: с какой маской мерить исходную модель")
     ap.add_argument("--checkpoint", default="final.pt",
                     help="none — исходные веса без обучения (контроль: помогло ли обучение вообще)")
+    ap.add_argument("--arch", default=None, choices=list(ARCH_NAMES),
+                    help="только для --checkpoint none; обученный прогон сам помнит схему")
+    ap.add_argument("--reliability-token", default="studio", choices=list(BUCKETS),
+                    help="токен надёжности на выводе (якорная схема); по умолчанию «студия»")
+    ap.add_argument("--reliability-guidance", type=float, default=0.0,
+                    help="сила guidance по надёжности: 0 — выключено (один проход), "
+                         "1 — то же, что без guidance, больше 1 — шаг от «неизвестно» к токену")
     ap.add_argument("--seed", type=int, default=0, help="база сидов стартового шума")
     ap.add_argument("--steps", type=int, default=50)
     ap.add_argument("--batch-size", type=int, default=4)
@@ -119,6 +153,11 @@ def main() -> int:
             raise SystemExit("--mask-stage допустим только с --checkpoint none: "
                              "обученный прогон сам помнит свою маску")
         hp["mask_stage"] = args.mask_stage
+    if args.arch:
+        if args.checkpoint != "none":
+            raise SystemExit("--arch допустим только с --checkpoint none: "
+                             "обученный прогон сам помнит свою схему")
+        hp["arch"] = {**(hp.get("arch") or {}), "name": args.arch}
     snapshot = args.run / "train_config.yaml"
     if snapshot.exists():
         trained = yaml.safe_load(snapshot.read_text(encoding="utf-8"))
@@ -127,10 +166,19 @@ def main() -> int:
                 raise SystemExit(
                     f"{key}: прогон учился с {trained.get(key)!r}, а конфиг задаёт {hp.get(key)!r}. "
                     f"Замер с другой маской или разрешением бессмыслен.")
+        # Схема берётся из снимка целиком: чекпоинт содержит веса ровно тех
+        # модулей, которые были собраны при обучении.
+        hp["arch"] = trained.get("arch") or {"name": "catvton"}
     elif args.checkpoint != "none":
         print("ВНИМАНИЕ: в прогоне нет train_config.yaml (старый прогон) — "
-              "считаю, что учился на mask_stage=agnostic")
+              "считаю, что учился на mask_stage=agnostic по базовой схеме")
         hp["mask_stage"] = "agnostic"
+        hp["arch"] = {"name": "catvton"}
+    flags = arch_flags(hp)
+    token = BUCKETS.index(args.reliability_token)
+    print(f"архитектура: {flags['name']}"
+          + (f"   токен «{args.reliability_token}»   guidance {args.reliability_guidance}"
+             if uses_condition(flags) else ""))
     paths = load_paths(load_config(args.config))
     device = args.device or hp.get("device", "cuda")
     dtype = torch.float16 if hp.get("fp16", True) else torch.float32
@@ -148,11 +196,12 @@ def main() -> int:
 
     dataset = VTONPairs(test, paths.raw_root, paths.preproc_root,
                         height=hp["height"], width=hp["width"], flip=False,
-                        mask_stage=hp.get("mask_stage", "agnostic"))
+                        mask_stage=hp.get("mask_stage", "agnostic"),
+                        guide=flags["guide"], garment_embed=flags["garment_embed"])
     loader = torch.utils.data.DataLoader(dataset, batch_size=args.batch_size,
                                          shuffle=False, num_workers=hp.get("workers", 4))
 
-    from diffusers import AutoencoderKL, DDIMScheduler, UNet2DConditionModel
+    from diffusers import AutoencoderKL, DDIMScheduler
     from torchmetrics.functional.image import structural_similarity_index_measure
     from torchmetrics.image import (
         FrechetInceptionDistance, KernelInceptionDistance,
@@ -161,7 +210,7 @@ def main() -> int:
 
     vae_dtype = torch.float16 if hp.get("vae_fp16", False) else torch.float32
     vae = load_component(AutoencoderKL, "vae").to(device, vae_dtype).eval()
-    unet = load_component(UNet2DConditionModel, "unet").to(device, dtype).eval()
+    unet = build_unet(flags).to(device, dtype).eval()
     # Замер не обучает: замораживается всё. freeze_except_self_attention здесь
     # была ошибкой — она размораживает слои внимания, и 50 шагов диффузии
     # строили граф градиентов через все шаги сразу: 23 ГБ на первом батче.
@@ -193,7 +242,8 @@ def main() -> int:
 
     for batch in tqdm(loader, desc="генерация", unit="batch"):
         predicted = generate(unet, vae, scheduler, batch, device, dtype, vae_dtype,
-                             args.steps, base_seed=args.seed)
+                             args.steps, base_seed=args.seed, flags=flags, token=token,
+                             guidance=args.reliability_guidance)
         truth = batch["person"].to(device, predicted.dtype)
 
         pred_u8, true_u8 = to_uint8(predicted), to_uint8(truth)
@@ -236,7 +286,9 @@ def main() -> int:
     kid_mean, kid_std = kid.compute()
     metrics = {
         "run": str(args.run), "step": step, "pairs": len(per_pair),
-        "steps": args.steps, "seed": args.seed,
+        "steps": args.steps, "seed": args.seed, "arch": flags["name"],
+        "reliability_token": args.reliability_token if uses_condition(flags) else None,
+        "reliability_guidance": args.reliability_guidance if flags["reliability"] else None,
         "ssim": float(per_pair.ssim.mean()),
         "lpips": float(per_pair.lpips.mean()),
         "l1_mask": float(per_pair.l1_mask.mean()),

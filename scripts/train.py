@@ -3,6 +3,7 @@
 
     python scripts/train.py --config-name studio
     python scripts/train.py --config-name studio_wild   # продолжит с последней точки
+    python scripts/train.py --config-name studio_wild --arch anchor   # якорная схема
 
 Три конфигурации отличаются только составом обучающих пар (см. posefit.pairs.CONFIGS);
 всё остальное — модель, гиперпараметры, seed — держится одинаковым, иначе
@@ -31,9 +32,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 # torch и всё, что его тянет, импортируются внутри main(): --dry-run обязан
 # работать на машине без GPU, иначе проверить состав данных можно только там,
 # где идёт обучение.
+from posefit.arch import ARCH_NAMES, arch_flags, uses_condition  # noqa: E402
 from posefit.pairs import CONFIGS, select_pairs  # noqa: E402
 from posefit.paths import DEFAULT_CONFIG, load_config, load_paths  # noqa: E402
 from posefit.preprocess import output_path  # noqa: E402
+from posefit.reliability import NULL_TOKEN, assign_reliability, describe  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:
@@ -46,6 +49,9 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--mask-stage", default=None, choices=["agnostic", "agnostic_refined"],
                     help="перебивает mask_stage из конфига; по умолчанию каталог "
                          "прогона получает суффикс _refined")
+    ap.add_argument("--arch", default=None, choices=list(ARCH_NAMES),
+                    help="перебивает arch.name из конфига: catvton — базовая схема, "
+                         "anchor — якорная; каталог прогона получает суффикс _anchor")
     ap.add_argument("--restart", action="store_true",
                     help="начать с нуля, затерев прошлый прогон "
                          "(по умолчанию обучение продолжается с последней точки)")
@@ -56,30 +62,40 @@ def parse_args() -> argparse.Namespace:
     return ap.parse_args()
 
 
-def check_inputs(selected: pd.DataFrame, paths, probe: int = 200) -> None:
+def check_inputs(selected: pd.DataFrame, paths, probe: int = 200,
+                 flags: dict | None = None) -> None:
     """Проверяет, что файлы, которые запросит загрузчик, существуют.
 
     Отсутствующая маска всплыла бы через десять минут после старта, посреди
     первой эпохи, и уронила бы прогон. Выборочная проверка стоит секунды.
+    Якорная схема тянет ещё позу, parse выкладки и вектор вещи — они
+    проверяются по тем же строкам, когда включены.
     """
     if selected.empty:
         raise SystemExit("под эту конфигурацию не отобрано ни одной пары")
+    flags = flags or {}
 
     sample = selected.sample(min(probe, len(selected)), random_state=0)
     missing: list[str] = []
+    checked = 0
     for row in sample.itertuples():
-        for rel in (row.person_rel_path, row.garment_rel_path):
-            if not (paths.raw_root / rel).exists():
-                missing.append(f"нет кадра: {rel}")
-        mask = output_path(paths.preproc_root, "agnostic", row.sku_id, row.person_image_id)
-        if not mask.exists():
-            missing.append(f"нет маски: {mask}")
+        wanted = [paths.raw_root / row.person_rel_path, paths.raw_root / row.garment_rel_path,
+                  output_path(paths.preproc_root, "agnostic", row.sku_id, row.person_image_id)]
+        if flags.get("guide"):
+            wanted.append(output_path(paths.preproc_root, "pose", row.sku_id, row.person_image_id))
+            wanted.append(output_path(paths.preproc_root, "parse", row.sku_id, row.garment_image_id))
+        if flags.get("garment_embed"):
+            wanted.append(output_path(paths.preproc_root, "embed", row.sku_id, row.garment_image_id))
+        for path in wanted:
+            checked += 1
+            if not path.exists():
+                missing.append(f"нет файла: {path}")
 
     if missing:
         for line in missing[:5]:
             print(f"  {line}", file=sys.stderr)
-        raise SystemExit(f"не хватает {len(missing)} файлов из {len(sample) * 3} проверенных")
-    print(f"  проверено файлов: {len(sample) * 3}, все на месте")
+        raise SystemExit(f"не хватает {len(missing)} файлов из {checked} проверенных")
+    print(f"  проверено файлов: {checked}, все на месте")
 
 
 def save_checkpoint(path: Path, step: int, unet, optimizer, scheduler, scaler) -> None:
@@ -138,7 +154,14 @@ def main() -> int:
     paths = load_paths(load_config(args.config))
     if args.mask_stage:
         hp["mask_stage"] = args.mask_stage
+    if args.arch:
+        hp["arch"] = {**(hp.get("arch") or {}), "name": args.arch}
+    # Флаги считаются до импорта torch: --dry-run обязан показать, что именно
+    # будет обучаться, и упасть на опечатке в имени схемы.
+    flags = arch_flags(hp)
     suffix = "_refined" if hp.get("mask_stage") == "agnostic_refined" else ""
+    if flags["name"] != "catvton":
+        suffix += f"_{flags['name']}"
     out_dir = args.out or Path("runs") / f"{args.config_name}{suffix}"
     out_dir.mkdir(parents=True, exist_ok=True)
     # Снимок гиперпараметров рядом с весами. Замер читает отсюда, а не из
@@ -157,19 +180,30 @@ def main() -> int:
           f"студия {int((selected['ветка'] == 'studio').sum())} / "
           f"wild {int((selected['ветка'] == 'wild').sum())}")
     print(f"  разрешение {hp['width']}x{hp['height']}   батч {hp['batch_size']}")
-    check_inputs(selected, paths)
+    print(f"  архитектура: {flags['name']}   "
+          + "   ".join(f"{k}={'да' if flags[k] else 'нет'}"
+                       for k in ("guide", "reliability", "garment_embed")))
+    if flags["reliability"]:
+        # Корзины считаются по отобранным парам этого прогона: пороги зависят
+        # от состава, и у studio_clean шумных корзин не будет вовсе.
+        selected = selected.copy()
+        selected["reliability"] = assign_reliability(
+            selected, hp.get("clean_quantile", 0.65),
+            (hp.get("arch") or {}).get("noisy_quantile", 0.3)).to_numpy()
+        print(f"  корзины надёжности: {describe(selected['reliability'])}")
+    check_inputs(selected, paths, flags=flags)
     if args.dry_run:
         return 0
 
     import torch
-    from diffusers import AutoencoderKL, DDPMScheduler, UNet2DConditionModel
+    from diffusers import AutoencoderKL, DDPMScheduler
     from torch.utils.data import DataLoader
 
     from posefit.dataset import VTONPairs
     from posefit.model import (
-        BACKBONE, build_inputs, count_parameters, empty_conditioning, encode,
-        load_component, masked_mse,
-        freeze_except_self_attention, unet_input,
+        BACKBONE, build_guide, build_inputs, build_unet, count_parameters,
+        drop_condition, empty_conditioning, encode, load_component, masked_mse,
+        pack_condition, trainable_parameters, unet_input,
     )
 
     dtype = torch.float16 if hp.get("fp16", True) else torch.float32
@@ -177,7 +211,8 @@ def main() -> int:
 
     dataset = VTONPairs(selected, paths.raw_root, paths.preproc_root,
                         height=hp["height"], width=hp["width"], flip=hp.get("flip", True),
-                        mask_stage=hp.get("mask_stage", "agnostic"))
+                        mask_stage=hp.get("mask_stage", "agnostic"),
+                        guide=flags["guide"], garment_embed=flags["garment_embed"])
     loader = DataLoader(dataset, batch_size=hp["batch_size"], shuffle=True,
                         num_workers=hp.get("workers", 8), pin_memory=True, drop_last=True)
 
@@ -187,10 +222,12 @@ def main() -> int:
     vae_dtype = torch.float16 if hp.get("vae_fp16", False) else torch.float32
     vae = load_component(AutoencoderKL, "vae").to(device, vae_dtype).eval()
     vae.requires_grad_(False)
-    unet = load_component(UNet2DConditionModel, "unet").to(device)
+    # Один и тот же сборщик для обучения и замера: расширенный conv_in и
+    # глобальное условие должны существовать до загрузки чекпоинта.
+    unet = build_unet(flags).to(device)
     noise_scheduler = DDPMScheduler.from_pretrained(BACKBONE, subfolder="scheduler")
 
-    trainable = freeze_except_self_attention(unet)
+    trainable = trainable_parameters(unet, flags)
     print(f"  обучаемых параметров: {count_parameters(trainable) / 1e6:.1f} млн "
           f"из {count_parameters(unet.parameters()) / 1e6:.0f} млн")
     if hp.get("gradient_checkpointing", True):
@@ -235,6 +272,22 @@ def main() -> int:
                 garment_latents = encode(vae, garment).to(dtype)
             target, mask_latent, masked_latent = build_inputs(person_latents, garment_latents, mask)
 
+            guide = None
+            if flags["guide"]:
+                guide = build_guide(batch["guide_person"].to(device, non_blocking=True),
+                                    batch["guide_garment"].to(device, non_blocking=True),
+                                    target.shape[-2:])
+            condition = None
+            if uses_condition(flags):
+                reliability = batch["reliability"].to(device)
+                if flags["reliability"]:
+                    # Часть токенов заменяется на «неизвестно»: без этого на
+                    # выводе не из чего строить guidance по надёжности.
+                    reliability = drop_condition(reliability, flags["cond_dropout"], NULL_TOKEN)
+                condition = pack_condition(
+                    reliability,
+                    batch["garment_embed"].to(device) if flags["garment_embed"] else None)
+
             noise = torch.randn_like(target)
             timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps,
                                       (target.shape[0],), device=device).long()
@@ -242,9 +295,10 @@ def main() -> int:
 
             with torch.autocast("cuda", dtype=dtype, enabled=dtype == torch.float16):
                 predicted = unet(
-                    unet_input(noisy, mask_latent, masked_latent),
+                    unet_input(noisy, mask_latent, masked_latent, guide),
                     timesteps,
                     encoder_hidden_states=empty_conditioning(target.shape[0], device, dtype),
+                    class_labels=condition,
                 ).sample
                 # Потери считаются только на половине с человеком: правая
                 # половина — вход-эталон, восстанавливать её незачем.

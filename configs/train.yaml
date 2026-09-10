@@ -31,3 +31,15 @@ clean_quantile: 0.65
 
 log_every: 50
 save_every: 1000
+
+# Архитектура. catvton — базовая схема; anchor — якорная: канонические
+# координаты тела и надёжность пары как условие (см. posefit/model.py).
+# Флаги ниже действуют только при name: anchor — для абляции по компонентам.
+# Переключается и из командной строки: --arch anchor.
+arch:
+  name: catvton
+  guide: true            # три входных канала: u, v в системе торса и скелет
+  reliability: true      # токен корзины надёжности через временной эмбеддинг
+  garment_embed: true    # DINOv2-вектор вещи через временной эмбеддинг
+  cond_dropout: 0.1      # доля примеров с токеном «неизвестно» — для guidance
+  noisy_quantile: 0.3    # граница wild_mid / wild_noisy по colour_rank
