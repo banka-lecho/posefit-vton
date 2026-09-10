@@ -10,6 +10,13 @@
 Тестовый набор — только вручную подтверждённые пары (cache/test_set.parquet):
 автоматически отобранные содержат около 20% неверных расцветок, и метрика на
 них мерила бы шум фильтра, а не качество модели.
+
+Стартовый шум для каждой пары фиксирован и одинаков во всех прогонах: разница
+между моделями не должна смешиваться с разницей в случайном шуме. Метрики
+пишутся по каждой паре в metrics_pairs.csv — по ним compare_runs.py считает
+парную значимость.
+
+    python scripts/evaluate.py --run runs/zero_shot --checkpoint none   # без обучения
 """
 
 from __future__ import annotations
@@ -33,6 +40,7 @@ from posefit.model import (  # noqa: E402
     BACKBONE, build_inputs, decode, empty_conditioning, encode,
     freeze_except_self_attention, take_person_half, unet_input,
 )
+from posefit.evaluation import mask_bbox, masked_l1, pair_seed  # noqa: E402
 from posefit.paths import DEFAULT_CONFIG, load_config, load_paths  # noqa: E402
 
 
@@ -42,7 +50,21 @@ def to_uint8(images: torch.Tensor) -> torch.Tensor:
 
 
 @torch.no_grad()
-def generate(unet, vae, scheduler, batch, device, dtype, vae_dtype, steps: int) -> torch.Tensor:
+def initial_noise(shape, pair_ids, base_seed: int, device, dtype) -> torch.Tensor:
+    """Стартовый шум, одинаковый для одной пары во всех прогонах.
+
+    Генерируется на CPU: генераторы CUDA дают разные последовательности на
+    разном железе, и повторить замер на другой карте было бы нельзя.
+    """
+    noise = [
+        torch.randn(shape[1:], generator=torch.Generator("cpu").manual_seed(pair_seed(pid, base_seed)))
+        for pid in pair_ids
+    ]
+    return torch.stack(noise).to(device, dtype)
+
+
+def generate(unet, vae, scheduler, batch, device, dtype, vae_dtype, steps: int,
+             base_seed: int = 0) -> torch.Tensor:
     person = batch["person"].to(device, vae_dtype)
     garment = batch["garment"].to(device, vae_dtype)
     mask = batch["mask"].to(device, dtype)
@@ -51,7 +73,7 @@ def generate(unet, vae, scheduler, batch, device, dtype, vae_dtype, steps: int) 
     garment_latents = encode(vae, garment).to(dtype)
     _, mask_latent, masked_latent = build_inputs(person_latents, garment_latents, mask)
 
-    latents = torch.randn_like(masked_latent)
+    latents = initial_noise(masked_latent.shape, batch["pair_id"], base_seed, device, dtype)
     scheduler.set_timesteps(steps, device=device)
     latents = latents * scheduler.init_noise_sigma
     conditioning = empty_conditioning(latents.shape[0], device, dtype)
@@ -73,7 +95,9 @@ def main() -> int:
     ap.add_argument("--config", default=DEFAULT_CONFIG, type=Path)
     ap.add_argument("--train-config", default=Path("configs/train.yaml"), type=Path)
     ap.add_argument("--run", required=True, type=Path, help="каталог прогона, например runs/studio")
-    ap.add_argument("--checkpoint", default="final.pt")
+    ap.add_argument("--checkpoint", default="final.pt",
+                    help="none — исходные веса без обучения (контроль: помогло ли обучение вообще)")
+    ap.add_argument("--seed", type=int, default=0, help="база сидов стартового шума")
     ap.add_argument("--steps", type=int, default=50)
     ap.add_argument("--batch-size", type=int, default=4)
     ap.add_argument("--limit", type=int, default=0)
@@ -103,47 +127,92 @@ def main() -> int:
                                          shuffle=False, num_workers=hp.get("workers", 4))
 
     from diffusers import AutoencoderKL, DDIMScheduler, UNet2DConditionModel
+    from torchmetrics.functional.image import structural_similarity_index_measure
     from torchmetrics.image import (
-        FrechetInceptionDistance, LearnedPerceptualImagePatchSimilarity,
-        StructuralSimilarityIndexMeasure,
+        FrechetInceptionDistance, KernelInceptionDistance,
+        LearnedPerceptualImagePatchSimilarity,
     )
 
     vae_dtype = torch.float16 if hp.get("vae_fp16", False) else torch.float32
     vae = load_component(AutoencoderKL, "vae").to(device, vae_dtype).eval()
     unet = load_component(UNet2DConditionModel, "unet").to(device, dtype).eval()
     freeze_except_self_attention(unet)
-    state = torch.load(args.run / args.checkpoint, map_location=device)
-    unet.load_state_dict({k: v.to(dtype) for k, v in state["unet"].items()}, strict=False)
-    print(f"веса с шага {state['step']} из {args.run / args.checkpoint}")
+    if args.checkpoint == "none":
+        # Контроль: исходный SD inpainting, склейку «человек | вещь» не видевший.
+        # Если обученные модели его не обгонят — обучение ничего не дало.
+        step = 0
+        print("веса исходные, без обучения")
+    else:
+        state = torch.load(args.run / args.checkpoint, map_location=device)
+        unet.load_state_dict({k: v.to(dtype) for k, v in state["unet"].items()}, strict=False)
+        step = int(state["step"])
+        print(f"веса с шага {step} из {args.run / args.checkpoint}")
+    args.run.mkdir(parents=True, exist_ok=True)
     scheduler = DDIMScheduler.from_pretrained(BACKBONE, subfolder="scheduler")
 
-    ssim = StructuralSimilarityIndexMeasure(data_range=255.0).to(device)
     lpips = LearnedPerceptualImagePatchSimilarity(net_type="alex", normalize=True).to(device)
     fid = FrechetInceptionDistance(feature=2048, normalize=True).to(device)
+    # FID на нескольких сотнях картинок смещён и шумен; KID несмещён и для
+    # малых выборок надёжнее. Считаются оба, в выводах опираться на KID.
+    kid = KernelInceptionDistance(subset_size=min(100, len(dataset)), normalize=True).to(device)
+    rows: list[dict] = []
 
     out_dir = args.run / "preds"
     if args.save_images:
         out_dir.mkdir(parents=True, exist_ok=True)
 
     for batch in tqdm(loader, desc="генерация", unit="batch"):
-        predicted = generate(unet, vae, scheduler, batch, device, dtype, vae_dtype, args.steps)
+        predicted = generate(unet, vae, scheduler, batch, device, dtype, vae_dtype,
+                             args.steps, base_seed=args.seed)
         truth = batch["person"].to(device, predicted.dtype)
 
         pred_u8, true_u8 = to_uint8(predicted), to_uint8(truth)
-        ssim.update(pred_u8.float(), true_u8.float())
-        # LPIPS и FID ждут [0,1] при normalize=True.
-        lpips.update(pred_u8.float() / 255.0, true_u8.float() / 255.0)
-        fid.update(true_u8.float() / 255.0, real=True)
-        fid.update(pred_u8.float() / 255.0, real=False)
+        pred01, true01 = pred_u8.float() / 255.0, true_u8.float() / 255.0
+        fid.update(true01, real=True)
+        fid.update(pred01, real=False)
+        kid.update(true01, real=True)
+        kid.update(pred01, real=False)
+
+        ssim_each = structural_similarity_index_measure(
+            pred_u8.float(), true_u8.float(), data_range=255.0, reduction="none")
+        masks = batch["mask"].cpu().numpy()[:, 0]
+        pred_np = pred_u8.cpu().numpy().transpose(0, 2, 3, 1)
+        true_np = true_u8.cpu().numpy().transpose(0, 2, 3, 1)
+
+        for i, pair_id in enumerate(batch["pair_id"]):
+            row = {
+                "pair_id": pair_id,
+                "category_group": batch["category_group"][i],
+                "ssim": float(ssim_each[i]),
+                "lpips": float(lpips(pred01[i:i + 1], true01[i:i + 1])),
+                "l1_mask": masked_l1(pred_np[i], true_np[i], masks[i]),
+                "lpips_mask": float("nan"),
+            }
+            # Вне маски модель копирует вход, и метрика по целому кадру на
+            # четыре пятых мерит совпадения, от модели не зависящие.
+            box = mask_bbox(masks[i])
+            if box is not None and (box[1] - box[0]) >= 32 and (box[3] - box[2]) >= 32:
+                y0, y1, x0, x1 = box
+                row["lpips_mask"] = float(lpips(pred01[i:i + 1, :, y0:y1, x0:x1],
+                                                true01[i:i + 1, :, y0:y1, x0:x1]))
+            rows.append(row)
 
         if args.save_images:
             for pair_id, image in zip(batch["pair_id"], pred_u8.cpu().numpy()):
                 Image.fromarray(image.transpose(1, 2, 0)).save(out_dir / f"{pair_id}.jpg", quality=95)
 
+    per_pair = pd.DataFrame(rows)
+    per_pair.to_csv(args.run / "metrics_pairs.csv", index=False)
+    kid_mean, kid_std = kid.compute()
     metrics = {
-        "run": str(args.run), "step": int(state["step"]), "pairs": len(dataset),
-        "steps": args.steps,
-        "ssim": float(ssim.compute()), "lpips": float(lpips.compute()), "fid": float(fid.compute()),
+        "run": str(args.run), "step": step, "pairs": len(per_pair),
+        "steps": args.steps, "seed": args.seed,
+        "ssim": float(per_pair.ssim.mean()),
+        "lpips": float(per_pair.lpips.mean()),
+        "l1_mask": float(per_pair.l1_mask.mean()),
+        "lpips_mask": float(per_pair.lpips_mask.mean()),
+        "kid": float(kid_mean), "kid_std": float(kid_std),
+        "fid": float(fid.compute()),
     }
     (args.run / "metrics.json").write_text(json.dumps(metrics, ensure_ascii=False, indent=2),
                                            encoding="utf-8")

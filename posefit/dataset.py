@@ -80,4 +80,6 @@ class VTONPairs(Dataset):
             "garment": np.ascontiguousarray(garment.transpose(2, 0, 1)),
             "mask": np.ascontiguousarray(mask.transpose(2, 0, 1)),
             "pair_id": row["pair_id"],
+            # Для разбивки метрик по группам одежды при замере.
+            "category_group": str(row.get("category_group", "")),
         }
