@@ -39,7 +39,9 @@ from posefit.model import (  # noqa: E402
     BACKBONE, build_inputs, decode, empty_conditioning, encode,
     load_component, take_person_half, unet_input,
 )
-from posefit.evaluation import mask_bbox, masked_l1, pair_seed  # noqa: E402
+from posefit.evaluation import (  # noqa: E402
+    mask_bbox, masked_l1, pair_seed, resolve_eval_config,
+)
 from posefit.paths import DEFAULT_CONFIG, load_config, load_paths  # noqa: E402
 
 
@@ -111,26 +113,12 @@ def main() -> int:
     torch.set_grad_enabled(False)
 
     hp = yaml.safe_load(args.train_config.read_text(encoding="utf-8"))
-    # Прогон помнит, на чём учился. Расхождение с текущим конфигом — ошибка,
-    # а не повод молча взять один из вариантов: маска и разрешение при замере
-    # обязаны совпадать с обучением.
-    if args.mask_stage:
-        if args.checkpoint != "none":
-            raise SystemExit("--mask-stage допустим только с --checkpoint none: "
-                             "обученный прогон сам помнит свою маску")
-        hp["mask_stage"] = args.mask_stage
-    snapshot = args.run / "train_config.yaml"
-    if snapshot.exists():
-        trained = yaml.safe_load(snapshot.read_text(encoding="utf-8"))
-        for key in ("mask_stage", "height", "width"):
-            if trained.get(key, hp.get(key)) != hp.get(key):
-                raise SystemExit(
-                    f"{key}: прогон учился с {trained.get(key)!r}, а конфиг задаёт {hp.get(key)!r}. "
-                    f"Замер с другой маской или разрешением бессмыслен.")
-    elif args.checkpoint != "none":
-        print("ВНИМАНИЕ: в прогоне нет train_config.yaml (старый прогон) — "
-              "считаю, что учился на mask_stage=agnostic")
-        hp["mask_stage"] = "agnostic"
+    try:
+        hp, source = resolve_eval_config(hp, args.run, args.checkpoint, args.mask_stage)
+    except ValueError as exc:
+        raise SystemExit(str(exc))
+    print(f"параметры обучения: {source}")
+    print(f"маска: {hp.get('mask_stage', 'agnostic')}   разрешение {hp['width']}x{hp['height']}")
     paths = load_paths(load_config(args.config))
     device = args.device or hp.get("device", "cuda")
     dtype = torch.float16 if hp.get("fp16", True) else torch.float32

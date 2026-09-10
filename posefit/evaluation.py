@@ -17,8 +17,10 @@
 from __future__ import annotations
 
 import hashlib
+from pathlib import Path
 
 import numpy as np
+import yaml
 
 
 def pair_seed(pair_id: str, base: int = 0) -> int:
@@ -86,3 +88,38 @@ def paired_difference(a: np.ndarray, b: np.ndarray, n_boot: int = 5000, seed: in
     except ImportError:
         result["wilcoxon_p"] = float("nan")
     return result
+
+
+# Параметры, которые обязаны совпадать с обучением: модель, обученная на одной
+# маске или разрешении, на другой меряет не себя.
+TRAINED_KEYS = ("mask_stage", "height", "width")
+
+
+def resolve_eval_config(hp: dict, run: Path, checkpoint: str,
+                        mask_stage: str | None = None) -> tuple[dict, str]:
+    """Гиперпараметры для замера и пояснение, откуда они взяты.
+
+    Обученный прогон — единственный источник правды о том, на чём он учился:
+    маска и разрешение берутся из его снимка train_config.yaml, а текущий
+    configs/train.yaml к моменту замера мог смениться и голоса не имеет.
+    Раньше расхождение с конфигом считалось ошибкой, и замер прогона с
+    уточнённой маской отказывался запускаться.
+    """
+    hp = dict(hp)
+    snapshot = Path(run) / "train_config.yaml"
+    if checkpoint == "none":
+        if mask_stage:
+            hp["mask_stage"] = mask_stage
+        return hp, "контроль без обучения"
+    if mask_stage:
+        raise ValueError("--mask-stage допустим только с --checkpoint none: "
+                         "обученный прогон сам помнит свою маску")
+    if snapshot.exists():
+        trained = yaml.safe_load(snapshot.read_text(encoding="utf-8")) or {}
+        for key in TRAINED_KEYS:
+            if key in trained:
+                hp[key] = trained[key]
+        return hp, f"из снимка {snapshot}"
+    # Прогоны до появления снимков учились на исходной маске.
+    hp["mask_stage"] = "agnostic"
+    return hp, "снимка нет (старый прогон) — считаю mask_stage=agnostic"
