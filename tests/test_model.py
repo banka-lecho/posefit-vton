@@ -228,9 +228,32 @@ def test_guide_is_downsampled_and_concatenated_like_the_latents():
 
     person = torch.ones(2, 3, 64, 48)
     garment = torch.zeros(2, 3, 64, 48)
-    guide = build_guide(person, garment, (8, 6))
+    guide = build_guide(person, garment, (8, 12))
     assert guide.shape == (2, 3, 8, 12)
     assert (guide[..., :6] == 1).all() and (guide[..., 6:] == 0).all()
+
+
+def test_guide_matches_the_concatenated_latents_as_called_in_training():
+    """Регрессия: обучение передаёт размер склейки target.shape[-2:], а функция
+    ждала размер половины — подсказки выходили вдвое шире латента, и torch.cat
+    падал на первом шаге. Здесь вызов повторяет train.py и evaluate.py буквально.
+    """
+    from posefit.model import build_guide
+
+    person, garment = _latents(), _latents()
+    target, mask_latent, masked = build_inputs(person, garment, torch.zeros(2, 1, 64, 48))
+    guide_person, guide_garment = torch.randn(2, 3, 64, 48), torch.randn(2, 3, 64, 48)
+    for size in (target.shape[-2:], masked.shape[-2:]):
+        guide = build_guide(guide_person, guide_garment, size)
+        assert guide.shape[-2:] == target.shape[-2:]
+        assert unet_input(torch.randn_like(target), mask_latent, masked, guide).shape == (2, 12, 8, 12)
+
+
+def test_guide_rejects_an_odd_concat_width():
+    from posefit.model import build_guide
+
+    with pytest.raises(ValueError, match="нечётная"):
+        build_guide(torch.zeros(1, 3, 8, 6), torch.zeros(1, 3, 8, 6), (8, 7))
 
 
 def test_unet_input_appends_guide_channels():

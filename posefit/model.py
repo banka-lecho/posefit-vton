@@ -268,12 +268,20 @@ def trainable_parameters(unet, flags: dict) -> list[torch.nn.Parameter]:
 
 
 def build_guide(guide_person: torch.Tensor, guide_garment: torch.Tensor,
-                latent_size: tuple[int, int]) -> torch.Tensor:
-    """Каналы-подсказки обеих половин, сведённые к размеру латента: (B, 3, h, 2w).
+                concat_size: tuple[int, int]) -> torch.Tensor:
+    """Каналы-подсказки обеих половин, сведённые к размеру склейки: (B, 3, h, 2w).
+
+    concat_size — (h, 2w) склеенного латента, то есть target.shape[-2:]:
+    ровно этот размер под рукой в месте вызова. Каждая половина сводится к
+    (h, w) и склеивается по ширине так же, как латенты человека и вещи.
 
     Усреднение по площади: координаты гладкие, а скелет после усреднения
     становится мягкой линией вместо рваной.
     """
-    person = F.interpolate(guide_person, size=latent_size, mode="area")
-    garment = F.interpolate(guide_garment, size=latent_size, mode="area")
+    height, width = int(concat_size[0]), int(concat_size[1])
+    if width % 2:
+        raise ValueError(f"ширина склейки {width} нечётная — это не пара половин")
+    half = (height, width // 2)
+    person = F.interpolate(guide_person, size=half, mode="area")
+    garment = F.interpolate(guide_garment, size=half, mode="area")
     return torch.cat([person, garment], dim=-1)
