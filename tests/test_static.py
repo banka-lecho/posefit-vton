@@ -41,3 +41,29 @@ def test_no_undefined_names_or_syntax_errors(path):
     fatal = [m for m in collector.messages
              if "undefined name" in m or "синтаксис" in m or "unexpected" in m.lower()]
     assert not fatal, "\n".join(fatal)
+
+
+def _function(tree, name):
+    import ast
+
+    return next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == name)
+
+
+def test_evaluation_never_tracks_gradients():
+    """Регрессия: декоратор no_grad однажды уехал с generate на соседнюю
+    функцию при правке, и 50 шагов диффузии копили граф градиентов —
+    замер падал по памяти на первом батче. Код при этом был валиден,
+    и pyflakes его пропускал.
+    """
+    import ast
+
+    tree = ast.parse((ROOT / "scripts" / "evaluate.py").read_text(encoding="utf-8"))
+
+    decorators = [ast.unparse(d) for d in _function(tree, "generate").decorator_list]
+    assert "torch.no_grad()" in decorators, f"generate без no_grad: {decorators}"
+
+    main_src = ast.unparse(_function(tree, "main"))
+    assert "torch.set_grad_enabled(False)" in main_src
+    # freeze_except_self_attention размораживает слои внимания — в замере ей не место.
+    assert "freeze_except_self_attention" not in main_src
+    assert "unet.requires_grad_(False)" in main_src

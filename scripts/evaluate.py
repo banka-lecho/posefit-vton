@@ -37,7 +37,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from posefit.dataset import VTONPairs  # noqa: E402
 from posefit.model import (  # noqa: E402
     BACKBONE, build_inputs, decode, empty_conditioning, encode,
-    freeze_except_self_attention, load_component, take_person_half, unet_input,
+    load_component, take_person_half, unet_input,
 )
 from posefit.evaluation import mask_bbox, masked_l1, pair_seed  # noqa: E402
 from posefit.paths import DEFAULT_CONFIG, load_config, load_paths  # noqa: E402
@@ -48,7 +48,6 @@ def to_uint8(images: torch.Tensor) -> torch.Tensor:
     return ((images + 1.0) * 127.5).clamp(0, 255).to(torch.uint8)
 
 
-@torch.no_grad()
 def initial_noise(shape, pair_ids, base_seed: int, device, dtype) -> torch.Tensor:
     """Стартовый шум, одинаковый для одной пары во всех прогонах.
 
@@ -62,6 +61,7 @@ def initial_noise(shape, pair_ids, base_seed: int, device, dtype) -> torch.Tenso
     return torch.stack(noise).to(device, dtype)
 
 
+@torch.no_grad()
 def generate(unet, vae, scheduler, batch, device, dtype, vae_dtype, steps: int,
              base_seed: int = 0) -> torch.Tensor:
     person = batch["person"].to(device, vae_dtype)
@@ -103,6 +103,10 @@ def main() -> int:
     ap.add_argument("--save-images", action="store_true")
     ap.add_argument("--device", default=None)
     args = ap.parse_args()
+    # Замер не обучает ничего. Глобальный выключатель — третий, независимый
+    # рубеж: даже если декоратор с generate снова уедет при правке, граф
+    # градиентов не построится.
+    torch.set_grad_enabled(False)
 
     hp = yaml.safe_load(args.train_config.read_text(encoding="utf-8"))
     paths = load_paths(load_config(args.config))
@@ -135,7 +139,11 @@ def main() -> int:
     vae_dtype = torch.float16 if hp.get("vae_fp16", False) else torch.float32
     vae = load_component(AutoencoderKL, "vae").to(device, vae_dtype).eval()
     unet = load_component(UNet2DConditionModel, "unet").to(device, dtype).eval()
-    freeze_except_self_attention(unet)
+    # Замер не обучает: замораживается всё. freeze_except_self_attention здесь
+    # была ошибкой — она размораживает слои внимания, и 50 шагов диффузии
+    # строили граф градиентов через все шаги сразу: 23 ГБ на первом батче.
+    unet.requires_grad_(False)
+    vae.requires_grad_(False)
     if args.checkpoint == "none":
         # Контроль: исходный SD inpainting, склейку «человек | вещь» не видевший.
         # Если обученные модели его не обгонят — обучение ничего не дало.
