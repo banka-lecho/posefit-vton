@@ -145,35 +145,32 @@ def main() -> int:
     torch.set_grad_enabled(False)
 
     hp = yaml.safe_load(args.train_config.read_text(encoding="utf-8"))
-    # Прогон помнит, на чём учился. Расхождение с текущим конфигом — ошибка,
-    # а не повод молча взять один из вариантов: маска и разрешение при замере
-    # обязаны совпадать с обучением.
-    if args.mask_stage:
-        if args.checkpoint != "none":
-            raise SystemExit("--mask-stage допустим только с --checkpoint none: "
-                             "обученный прогон сам помнит свою маску")
-        hp["mask_stage"] = args.mask_stage
-    if args.arch:
-        if args.checkpoint != "none":
-            raise SystemExit("--arch допустим только с --checkpoint none: "
-                             "обученный прогон сам помнит свою схему")
-        hp["arch"] = {**(hp.get("arch") or {}), "name": args.arch}
     snapshot = args.run / "train_config.yaml"
-    if snapshot.exists():
-        trained = yaml.safe_load(snapshot.read_text(encoding="utf-8"))
-        for key in ("mask_stage", "height", "width"):
-            if trained.get(key, hp.get(key)) != hp.get(key):
-                raise SystemExit(
-                    f"{key}: прогон учился с {trained.get(key)!r}, а конфиг задаёт {hp.get(key)!r}. "
-                    f"Замер с другой маской или разрешением бессмыслен.")
-        # Схема берётся из снимка целиком: чекпоинт содержит веса ровно тех
-        # модулей, которые были собраны при обучении.
-        hp["arch"] = trained.get("arch") or {"name": "catvton"}
-    elif args.checkpoint != "none":
-        print("ВНИМАНИЕ: в прогоне нет train_config.yaml (старый прогон) — "
-              "считаю, что учился на mask_stage=agnostic по базовой схеме")
-        hp["mask_stage"] = "agnostic"
-        hp["arch"] = {"name": "catvton"}
+    if args.checkpoint == "none":
+        # Контроль без обучения: снимка нет, маску и схему задаёт пользователь.
+        if args.mask_stage:
+            hp["mask_stage"] = args.mask_stage
+        if args.arch:
+            hp["arch"] = {**(hp.get("arch") or {}), "name": args.arch}
+    else:
+        if args.mask_stage or args.arch:
+            raise SystemExit("--mask-stage и --arch допустимы только с --checkpoint none: "
+                             "обученный прогон сам помнит свою маску и схему")
+        if snapshot.exists():
+            # Прогон — единственный источник правды о том, на чём он учился.
+            # Маска, разрешение и схема берутся из снимка; configs/train.yaml
+            # к этому моменту мог смениться и голоса здесь не имеет.
+            trained = yaml.safe_load(snapshot.read_text(encoding="utf-8"))
+            for key in ("mask_stage", "height", "width"):
+                if key in trained:
+                    hp[key] = trained[key]
+            hp["arch"] = trained.get("arch") or {"name": "catvton"}
+        else:
+            print("ВНИМАНИЕ: в прогоне нет train_config.yaml (старый прогон) — "
+                  "считаю, что учился на mask_stage=agnostic по базовой схеме")
+            hp["mask_stage"] = "agnostic"
+            hp["arch"] = {"name": "catvton"}
+    print(f"маска: {hp.get('mask_stage', 'agnostic')}   разрешение {hp['width']}x{hp['height']}")
     flags = arch_flags(hp)
     token = BUCKETS.index(args.reliability_token)
     print(f"архитектура: {flags['name']}"
