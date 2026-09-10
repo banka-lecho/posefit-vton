@@ -8,3 +8,4 @@ PyYAML>=6.0
 tqdm>=4.66
 pytest>=8.0
 matplotlib>=3.8
+pyflakes>=3.2

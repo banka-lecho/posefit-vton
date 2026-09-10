@@ -4,7 +4,7 @@
     python scripts/train.py --config-name studio
     python scripts/train.py --config-name studio_wild   # продолжит с последней точки
 
-Три конфигурации отличаются только составом обучающих пар (см. dataset.CONFIGS);
+Три конфигурации отличаются только составом обучающих пар (см. posefit.pairs.CONFIGS);
 всё остальное — модель, гиперпараметры, seed — держится одинаковым, иначе
 сравнение прогонов ничего не покажет.
 

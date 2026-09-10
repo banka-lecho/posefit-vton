@@ -26,7 +26,6 @@ import json
 import sys
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
 import torch
 import yaml
@@ -38,7 +37,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from posefit.dataset import VTONPairs  # noqa: E402
 from posefit.model import (  # noqa: E402
     BACKBONE, build_inputs, decode, empty_conditioning, encode,
-    freeze_except_self_attention, take_person_half, unet_input,
+    freeze_except_self_attention, load_component, take_person_half, unet_input,
 )
 from posefit.evaluation import mask_bbox, masked_l1, pair_seed  # noqa: E402
 from posefit.paths import DEFAULT_CONFIG, load_config, load_paths  # noqa: E402

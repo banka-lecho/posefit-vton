@@ -1,6 +1,5 @@
 import numpy as np
 import pandas as pd
-import pytest
 
 from posefit.preprocess import (
     ATR, STAGES, build_agnostic, output_path, pending, shard_of, torso_visible, working_set,

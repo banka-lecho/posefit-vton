@@ -19,7 +19,6 @@ import pandas as pd
 from PIL import Image
 from torch.utils.data import Dataset
 
-from .pairs import CONFIGS, select_pairs  # noqa: F401  (реэкспорт для скриптов)
 from .preprocess import load_canonical, output_path
 
 @dataclass(frozen=True)
