@@ -26,7 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from posefit.paths import DEFAULT_CONFIG, load_config, load_paths  # noqa: E402
 from posefit.preprocess import (  # noqa: E402
     MODELS, STAGES, TARGET_SIZE, build_agnostic, garment_crop, load_canonical,
-    output_path, pending, working_set, write_json,
+    output_path, pending, refine_agnostic, working_set, write_json,
 )
 
 COCO_KEYPOINTS = [
@@ -168,6 +168,27 @@ def run_agnostic(rows, paths, args) -> None:
     _report_missing(missing, len(rows), "parse")
 
 
+def run_agnostic_refined(rows, paths, args) -> None:
+    """Маска без лица и кистей. Только CPU: parse, поза и исходная маска уже есть."""
+    import json
+
+    missing = 0
+    for row in tqdm(list(rows.itertuples()), desc="agnostic_refined", unit="img"):
+        sources = {stage: output_path(paths.preproc_root, stage, row.sku_id, row.image_id)
+                   for stage in ("agnostic", "parse", "pose")}
+        if not all(path.exists() for path in sources.values()):
+            missing += 1
+            continue
+        mask = np.array(Image.open(sources["agnostic"]))
+        parse = np.array(Image.open(sources["parse"]))
+        pose = json.loads(sources["pose"].read_text(encoding="utf-8"))
+        refined = refine_agnostic(mask, parse, pose.get("keypoints", {}), pose.get("scores", {}))
+        target = output_path(paths.preproc_root, "agnostic_refined", row.sku_id, row.image_id)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        Image.fromarray(refined).save(target, optimize=True)
+    _report_missing(missing, len(rows), "agnostic/parse/pose")
+
+
 def run_embed(rows, paths, args) -> None:
     """Эмбеддинг DINOv2 для кропа вещи по маске parse.
 
@@ -245,7 +266,7 @@ def run_latents(rows, paths, args) -> None:
 
 RUNNERS = {
     "detect": run_detect, "parse": run_parse, "pose": run_pose,
-    "agnostic": run_agnostic, "embed": run_embed, "latents": run_latents,
+    "agnostic": run_agnostic, "agnostic_refined": run_agnostic_refined, "embed": run_embed, "latents": run_latents,
 }
 
 

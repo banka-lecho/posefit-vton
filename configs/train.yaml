@@ -23,6 +23,9 @@ clip_grad: 1.0
 max_steps: 30000
 
 flip: true
+# Какая маска: agnostic — как в первых прогонах; agnostic_refined — без лица и
+# кистей (они не одежда, а SD 1.5 на 384x512 рисует их с нуля плохо).
+mask_stage: agnostic
 # Порог расцветки для конфигурации studio_clean: жёстче рабочего 0.45.
 clean_quantile: 0.65
 

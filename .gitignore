@@ -30,3 +30,6 @@ cache/
 # результаты препроцессинга
 processed_data/
 processed_data.zip
+
+# прогоны обучения — веса и логи
+runs/

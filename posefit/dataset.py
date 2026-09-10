@@ -41,8 +41,13 @@ class VTONPairs(Dataset):
         width: int = 384,
         flip: bool = True,
         seed: int = 0,
+        mask_stage: str = "agnostic",
     ) -> None:
         self.pairs = pairs.reset_index(drop=True)
+        # Какую маску брать: "agnostic" — исходную, "agnostic_refined" — без
+        # лица и кистей. Задаётся конфигом обучения и обязана совпадать при
+        # замере, иначе модель получает не ту область, на которой училась.
+        self.mask_stage = mask_stage
         self.raw_root = Path(raw_root)
         self.preproc_root = Path(preproc_root)
         self.size = (width, height)
@@ -57,7 +62,7 @@ class VTONPairs(Dataset):
         return np.asarray(image, dtype=np.float32) / 127.5 - 1.0
 
     def _mask(self, sku_id: str, image_id: str) -> np.ndarray:
-        path = output_path(self.preproc_root, "agnostic", sku_id, image_id)
+        path = output_path(self.preproc_root, self.mask_stage, sku_id, image_id)
         mask = Image.open(path).resize(self.size, Image.NEAREST)
         return (np.asarray(mask, dtype=np.float32) > 127).astype(np.float32)[..., None]
 

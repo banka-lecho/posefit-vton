@@ -147,3 +147,87 @@ def test_garment_crop_fills_non_garment_pixels_inside_the_box():
     crop = garment_crop(image, parse, "dress", min_px=8, pad=0, fill=128)
     assert (crop[0, -1] == 128).all()
     assert (crop[0, 0] == 7).all()
+
+
+def _pose(**points):
+    kp = {k: [float(x), float(y)] for k, (x, y) in points.items()}
+    return kp, {k: 0.9 for k in kp}
+
+
+def test_hand_region_takes_the_arm_beyond_the_wrist():
+    from posefit.preprocess import hand_region
+
+    parse = np.zeros((40, 100), np.uint8)
+    parse[15:25, 10:90] = ATR["left_arm"]          # рука горизонтально
+    kp, sc = _pose(left_elbow=(20, 20), left_wrist=(70, 20))
+    hand = hand_region(parse, kp, sc)
+    assert hand[20, 85] and not hand[20, 40]
+
+
+def test_hand_region_keeps_fingers_past_a_short_foreshortened_forearm():
+    from posefit.preprocess import hand_region
+
+    # Рука вытянута к камере: предплечье в кадре короткое, кисть длиннее его.
+    parse = np.zeros((40, 100), np.uint8)
+    parse[15:25, 10:90] = ATR["left_arm"]
+    kp, sc = _pose(left_elbow=(20, 20), left_wrist=(30, 20))
+    hand = hand_region(parse, kp, sc)
+    assert hand[20, 88], "пальцы за пределами радиуса от запястья должны остаться в кисти"
+    assert not hand[20, 15]
+
+
+def test_hand_region_without_a_visible_wrist_is_empty():
+    from posefit.preprocess import hand_region
+
+    parse = np.zeros((40, 100), np.uint8)
+    parse[15:25, 10:90] = ATR["left_arm"]
+    kp, sc = _pose(left_elbow=(20, 20), left_wrist=(70, 20))
+    sc["left_wrist"] = 0.1
+    assert not hand_region(parse, kp, sc).any()
+
+
+def test_face_region_ignores_a_face_label_far_from_the_head():
+    from posefit.preprocess import face_region
+
+    parse = np.zeros((100, 60), np.uint8)
+    parse[5:20, 20:40] = ATR["face"]              # настоящее лицо
+    parse[70:90, 20:40] = ATR["face"]             # ложное «лицо» на брюках
+    kp, sc = _pose(nose=(30, 12), left_shoulder=(10, 30), right_shoulder=(50, 30))
+    face = face_region(parse, kp, sc)
+    assert face[12, 30] and not face[80, 30]
+
+
+def test_face_region_without_head_keypoints_carves_nothing():
+    from posefit.preprocess import face_region
+
+    parse = np.zeros((100, 60), np.uint8)
+    parse[5:20, 20:40] = ATR["face"]
+    kp, sc = _pose(nose=(30, 12))
+    sc["nose"] = 0.05
+    assert not face_region(parse, kp, sc).any()
+
+
+def test_refine_agnostic_carves_face_and_hand_but_keeps_the_garment():
+    from posefit.preprocess import refine_agnostic
+
+    parse = np.zeros((100, 100), np.uint8)
+    parse[5:20, 40:60] = ATR["face"]
+    parse[30:70, 30:70] = ATR["upper_clothes"]
+    parse[45:55, 70:98] = ATR["left_arm"]
+    mask = np.full((100, 100), 255, np.uint8)
+    kp, sc = _pose(nose=(50, 12), left_shoulder=(30, 30), right_shoulder=(70, 30),
+                   left_elbow=(72, 50), left_wrist=(85, 50))
+    refined = refine_agnostic(mask, parse, kp, sc, carve_px=0)
+    assert refined[12, 50] == 0          # лицо вырезано
+    assert refined[50, 95] == 0          # кисть вырезана
+    assert refined[50, 50] == 255        # вещь на месте
+    assert refined[50, 75] == 255        # предплечье до запястья остаётся
+
+
+def test_refine_agnostic_leaves_the_mask_untouched_without_pose():
+    from posefit.preprocess import refine_agnostic
+
+    parse = np.zeros((50, 50), np.uint8)
+    parse[5:15, 20:30] = ATR["face"]
+    mask = np.full((50, 50), 255, np.uint8)
+    assert (refine_agnostic(mask, parse, {}, {}) == mask).all()

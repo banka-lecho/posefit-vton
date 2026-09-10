@@ -43,6 +43,9 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--train-config", default=Path("configs/train.yaml"), type=Path)
     ap.add_argument("--config-name", required=True, choices=list(CONFIGS))
     ap.add_argument("--out", type=Path, default=None, help="по умолчанию runs/<config-name>")
+    ap.add_argument("--mask-stage", default=None, choices=["agnostic", "agnostic_refined"],
+                    help="перебивает mask_stage из конфига; по умолчанию каталог "
+                         "прогона получает суффикс _refined")
     ap.add_argument("--restart", action="store_true",
                     help="начать с нуля, затерев прошлый прогон "
                          "(по умолчанию обучение продолжается с последней точки)")
@@ -133,8 +136,16 @@ def main() -> int:
     args = parse_args()
     hp = yaml.safe_load(args.train_config.read_text(encoding="utf-8"))
     paths = load_paths(load_config(args.config))
-    out_dir = args.out or Path("runs") / args.config_name
+    if args.mask_stage:
+        hp["mask_stage"] = args.mask_stage
+    suffix = "_refined" if hp.get("mask_stage") == "agnostic_refined" else ""
+    out_dir = args.out or Path("runs") / f"{args.config_name}{suffix}"
     out_dir.mkdir(parents=True, exist_ok=True)
+    # Снимок гиперпараметров рядом с весами. Замер читает отсюда, а не из
+    # configs/train.yaml: конфиг к тому времени мог смениться, а модель обязана
+    # получить ту же маску и то же разрешение, на которых училась.
+    (out_dir / "train_config.yaml").write_text(yaml.safe_dump(hp, allow_unicode=True),
+                                               encoding="utf-8")
 
     device = args.device or hp.get("device", "cuda")
 
@@ -165,7 +176,8 @@ def main() -> int:
     torch.manual_seed(hp.get("seed", 0))
 
     dataset = VTONPairs(selected, paths.raw_root, paths.preproc_root,
-                        height=hp["height"], width=hp["width"], flip=hp.get("flip", True))
+                        height=hp["height"], width=hp["width"], flip=hp.get("flip", True),
+                        mask_stage=hp.get("mask_stage", "agnostic"))
     loader = DataLoader(dataset, batch_size=hp["batch_size"], shuffle=True,
                         num_workers=hp.get("workers", 8), pin_memory=True, drop_last=True)
 

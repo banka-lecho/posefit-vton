@@ -74,6 +74,8 @@ STAGES = {
         Stage("parse", "png"),
         Stage("pose", "json", needs=("detect",)),
         Stage("agnostic", "png", needs=("parse",)),
+        # Та же маска, но с вырезанными лицом и кистями — см. refine_agnostic.
+        Stage("agnostic_refined", "png", needs=("agnostic", "parse", "pose")),
         Stage("embed", "npy", needs=("parse",)),
         Stage("colour", "npy", needs=("parse",)),
         # Латенты обычного кадра. Латенты замаскированного кадра зависят от
@@ -170,6 +172,107 @@ def build_agnostic(parse: np.ndarray, group: str, dilate_px: int = 12) -> np.nda
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (dilate_px, dilate_px))
         mask = cv2.dilate(mask, kernel)
     return mask
+
+
+def _components_near(region: np.ndarray, anchors: list[np.ndarray], radius: float) -> np.ndarray:
+    """Связные куски region, у которых есть пиксель ближе radius к одной из опор."""
+    import cv2
+
+    if not region.any() or not anchors:
+        return np.zeros_like(region, dtype=bool)
+    count, labels = cv2.connectedComponents(region.astype(np.uint8), connectivity=8)
+    ys, xs = np.nonzero(region)
+    points = np.stack([xs, ys], axis=1).astype(np.float64)
+    near = np.zeros(len(points), dtype=bool)
+    for anchor in anchors:
+        near |= np.linalg.norm(points - anchor, axis=1) < radius
+    chosen = np.unique(labels[ys[near], xs[near]])
+    chosen = chosen[chosen != 0]
+    return np.isin(labels, chosen)
+
+
+def hand_region(parse: np.ndarray, keypoints: dict, scores: dict,
+                min_score: float = 0.3) -> np.ndarray:
+    """Кисти: связная часть руки за запястьем.
+
+    В разметке ATR кисть — часть класса «рука», поэтому граница проводится по
+    позе: берётся всё за запястьем по оси локоть→запястье, а из этого — только
+    куски, касающиеся самого запястья. Радиусом от запястья ограничивать нельзя:
+    когда рука вытянута к камере, предплечье в кадре укорочено, и пальцы
+    выходят за любой радиус, пропорциональный его длине.
+
+    Проверяются оба запястья — соглашения лево/право у ATR и COCO расходятся.
+    """
+    arm = np.isin(parse, [ATR["left_arm"], ATR["right_arm"]])
+    hand = np.zeros_like(arm)
+    ys, xs = np.nonzero(arm)
+    if not len(ys):
+        return hand
+    points = np.stack([xs, ys], axis=1).astype(np.float64)
+    for side in ("left", "right"):
+        elbow, wrist = f"{side}_elbow", f"{side}_wrist"
+        if scores.get(elbow, 0.0) < min_score or scores.get(wrist, 0.0) < min_score:
+            continue
+        e = np.asarray(keypoints[elbow][:2], dtype=np.float64)
+        w = np.asarray(keypoints[wrist][:2], dtype=np.float64)
+        axis = w - e
+        length = float(np.linalg.norm(axis))
+        if length < 5:
+            continue
+        # 0 у локтя, 1 у запястья. Порог чуть раньше запястья: точка запястья
+        # у позы стоит на суставе, и кромка ладони иначе осталась бы в маске.
+        beyond = np.zeros_like(arm)
+        along = (points - e) @ axis / length**2
+        beyond[ys[along > 0.9], xs[along > 0.9]] = True
+        hand |= _components_near(beyond, [w], radius=max(0.35 * length, 6.0))
+    return hand
+
+
+def face_region(parse: np.ndarray, keypoints: dict, scores: dict,
+                min_score: float = 0.3) -> np.ndarray:
+    """Лицо — только там, где по позе действительно голова.
+
+    Класс «лицо» у parse иногда ложно срабатывает на одежде: на тестовом наборе
+    он нашёлся на брюках. Вырезать его вслепую значит пробить дыру в маске
+    вещи, где осталась бы старая одежда. Поэтому берутся только куски,
+    касающиеся носа или глаз; не найдена голова — не вырезается ничего.
+    """
+    face = parse == ATR["face"]
+    heads = [np.asarray(keypoints[name][:2], dtype=np.float64)
+             for name in ("nose", "left_eye", "right_eye")
+             if scores.get(name, 0.0) >= min_score and name in keypoints]
+    if not heads:
+        return np.zeros_like(face)
+    # Масштаб головы — расстояние между плечами; без плеч берётся запас по кадру.
+    if scores.get("left_shoulder", 0) >= min_score and scores.get("right_shoulder", 0) >= min_score:
+        scale = float(np.linalg.norm(np.subtract(keypoints["left_shoulder"][:2],
+                                                 keypoints["right_shoulder"][:2])))
+    else:
+        scale = 0.1 * parse.shape[0]
+    return _components_near(face, heads, radius=max(0.5 * scale, 8.0))
+
+
+def refine_agnostic(mask: np.ndarray, parse: np.ndarray, keypoints: dict, scores: dict,
+                    carve_px: int = 4) -> np.ndarray:
+    """Вырезает из маски лицо и кисти: они никогда не бывают частью одежды.
+
+    На тестовом наборе кисть попадала в маску в 77% пар, край лица — в 82%:
+    модель рисовала их с нуля, и SD 1.5 на 384x512 делает это плохо. Вырез
+    небольшой — кисти занимают 3.3% маски, — а выигрыш виден на каждом кадре.
+
+    Вырезается уже расширенная маска, иначе расширение снова залезло бы на лицо.
+    Лицо и кисти берутся с небольшим запасом carve_px, чтобы край не остался
+    внутри маски полоской.
+    """
+    import cv2
+
+    keep = face_region(parse, keypoints, scores) | hand_region(parse, keypoints, scores)
+    if carve_px and keep.any():
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (carve_px, carve_px))
+        keep = cv2.dilate(keep.astype(np.uint8), kernel) > 0
+    refined = mask.copy()
+    refined[keep] = 0
+    return refined
 
 
 def garment_crop(

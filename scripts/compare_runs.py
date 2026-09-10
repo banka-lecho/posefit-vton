@@ -93,11 +93,24 @@ def main() -> int:
             report["metrics"][metric][name] = entry
 
         if args.by_category:
+            # Не только средние, но и парная значимость внутри группы: на 44
+            # парах outer разница, видная по средним, легко оказывается шумом.
             category = frames[reference].loc[common, "category_group"]
+            report["metrics"][metric]["by_category"] = {}
             for group in sorted(category.unique()):
                 idx = (category == group).to_numpy()
-                cells = "  ".join(f"{name}={values[name][idx].mean():.4f}" for name in values)
-                print(f"    {group:<7} n={int(idx.sum()):>3}  {cells}")
+                cells = []
+                entry = {}
+                for name in values:
+                    if name == reference:
+                        continue
+                    d = paired_difference(values[reference][idx], values[name][idx])
+                    mark = "*" if d["significant"] else " "
+                    cells.append(f"{name} {d['mean_diff']:+.4f}{mark}")
+                    entry[name] = d
+                print(f"    {group:<7} n={int(idx.sum()):>3}  " + "   ".join(cells))
+                report["metrics"][metric]["by_category"][group] = entry
+            print("    (* — интервал разницы с точкой отсчёта не накрывает ноль)")
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")

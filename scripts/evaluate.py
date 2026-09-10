@@ -94,6 +94,8 @@ def main() -> int:
     ap.add_argument("--config", default=DEFAULT_CONFIG, type=Path)
     ap.add_argument("--train-config", default=Path("configs/train.yaml"), type=Path)
     ap.add_argument("--run", required=True, type=Path, help="каталог прогона, например runs/studio")
+    ap.add_argument("--mask-stage", default=None, choices=["agnostic", "agnostic_refined"],
+                    help="только для --checkpoint none: с какой маской мерить исходную модель")
     ap.add_argument("--checkpoint", default="final.pt",
                     help="none — исходные веса без обучения (контроль: помогло ли обучение вообще)")
     ap.add_argument("--seed", type=int, default=0, help="база сидов стартового шума")
@@ -109,6 +111,26 @@ def main() -> int:
     torch.set_grad_enabled(False)
 
     hp = yaml.safe_load(args.train_config.read_text(encoding="utf-8"))
+    # Прогон помнит, на чём учился. Расхождение с текущим конфигом — ошибка,
+    # а не повод молча взять один из вариантов: маска и разрешение при замере
+    # обязаны совпадать с обучением.
+    if args.mask_stage:
+        if args.checkpoint != "none":
+            raise SystemExit("--mask-stage допустим только с --checkpoint none: "
+                             "обученный прогон сам помнит свою маску")
+        hp["mask_stage"] = args.mask_stage
+    snapshot = args.run / "train_config.yaml"
+    if snapshot.exists():
+        trained = yaml.safe_load(snapshot.read_text(encoding="utf-8"))
+        for key in ("mask_stage", "height", "width"):
+            if trained.get(key, hp.get(key)) != hp.get(key):
+                raise SystemExit(
+                    f"{key}: прогон учился с {trained.get(key)!r}, а конфиг задаёт {hp.get(key)!r}. "
+                    f"Замер с другой маской или разрешением бессмыслен.")
+    elif args.checkpoint != "none":
+        print("ВНИМАНИЕ: в прогоне нет train_config.yaml (старый прогон) — "
+              "считаю, что учился на mask_stage=agnostic")
+        hp["mask_stage"] = "agnostic"
     paths = load_paths(load_config(args.config))
     device = args.device or hp.get("device", "cuda")
     dtype = torch.float16 if hp.get("fp16", True) else torch.float32
@@ -125,7 +147,8 @@ def main() -> int:
         raise SystemExit(f"тестовые вещи встречаются в обучении: {sorted(leaked)[:5]}")
 
     dataset = VTONPairs(test, paths.raw_root, paths.preproc_root,
-                        height=hp["height"], width=hp["width"], flip=False)
+                        height=hp["height"], width=hp["width"], flip=False,
+                        mask_stage=hp.get("mask_stage", "agnostic"))
     loader = torch.utils.data.DataLoader(dataset, batch_size=args.batch_size,
                                          shuffle=False, num_workers=hp.get("workers", 4))
 
