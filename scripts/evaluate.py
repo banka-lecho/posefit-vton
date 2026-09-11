@@ -17,6 +17,11 @@
 парную значимость.
 
     python scripts/evaluate.py --run runs/zero_shot --checkpoint none   # без обучения
+    python scripts/evaluate.py --run runs/catvton_dresscode --official dresscode
+
+--official — опубликованный CatVTON с весами авторов (posefit/official.py):
+существующая модель, с которой сравниваются обученные. --run тогда задаёт
+только каталог для метрик.
 
 Архитектура берётся из снимка train_config.yaml прогона: расширенный conv_in и
 глобальное условие якорной схемы должны быть собраны до загрузки весов.
@@ -42,6 +47,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from posefit.arch import ARCH_NAMES, arch_flags, uses_condition  # noqa: E402
 from posefit.dataset import VTONPairs  # noqa: E402
 from posefit.generation import generate, load_models, to_uint8  # noqa: E402
+from posefit.official import (  # noqa: E402
+    DEFAULT_ETA, DEFAULT_GUIDANCE, VARIANTS, generate_official, load_official,
+)
 from posefit.evaluation import (  # noqa: E402
     eval_output_dir, mask_bbox, masked_l1, resolve_eval_config,
 )
@@ -66,6 +74,14 @@ def main() -> int:
     ap.add_argument("--reliability-guidance", type=float, default=0.0,
                     help="сила guidance по надёжности: 0 — выключено (один проход), "
                          "1 — то же, что без guidance, больше 1 — шаг от «неизвестно» к токену")
+    ap.add_argument("--official", default=None, choices=list(VARIANTS),
+                    help="опубликованный CatVTON с весами авторов вместо своего прогона: "
+                         "dresscode — верх, низ, платья в 512x384 (основной вариант), "
+                         "vitonhd — только верх, mix — обучен в 1024x768")
+    ap.add_argument("--official-guidance", type=float, default=DEFAULT_GUIDANCE,
+                    help="classifier-free guidance CatVTON; 2.5 — как в их замере")
+    ap.add_argument("--eta", type=float, default=DEFAULT_ETA,
+                    help="стохастичность DDIM у CatVTON; 1.0 — как в их замере")
     ap.add_argument("--seed", type=int, default=0, help="база сидов стартового шума")
     ap.add_argument("--steps", type=int, default=50)
     ap.add_argument("--batch-size", type=int, default=4)
@@ -77,13 +93,27 @@ def main() -> int:
     # рубеж: даже если декоратор с generate снова уедет при правке, граф
     # градиентов не построится.
     torch.set_grad_enabled(False)
+    # VAE кодирует выборкой из апостериорного распределения; без сида повторный
+    # замер отличался бы в последних знаках.
+    torch.manual_seed(args.seed)
 
     hp = yaml.safe_load(args.train_config.read_text(encoding="utf-8"))
+    if args.official:
+        # Своего прогона нет: маска и разрешение — из конфига или --mask-stage,
+        # как у контроля без обучения, схема — базовая, без подсказок.
+        if args.arch:
+            raise SystemExit("--arch и --official несовместимы: у CatVTON своя схема")
+        args.checkpoint = "none"
     try:
         hp, source = resolve_eval_config(hp, args.run, args.checkpoint,
                                          args.mask_stage, args.arch)
     except ValueError as exc:
         raise SystemExit(str(exc))
+    if args.official:
+        hp["arch"] = {"name": "catvton"}
+        source = f"опубликованный CatVTON, веса {VARIANTS[args.official]}"
+        if args.official == "mix" and (hp["height"], hp["width"]) != (1024, 768):
+            print(f"ВНИМАНИЕ: mix обучен в 1024x768, замер идёт в {hp['width']}x{hp['height']}")
     print(f"параметры обучения: {source}")
     print(f"маска: {hp.get('mask_stage', 'agnostic')}   разрешение {hp['width']}x{hp['height']}")
     flags = arch_flags(hp)
@@ -130,10 +160,18 @@ def main() -> int:
     # checkpoint="none" — контроль: исходный SD inpainting, склейку «человек |
     # вещь» не видевший. Если обученные модели его не обгонят — обучение
     # ничего не дало.
-    unet, vae, scheduler, step, dtype, vae_dtype = load_models(
-        hp, flags, args.run, args.checkpoint, device)
-    print("веса исходные, без обучения" if args.checkpoint == "none"
-          else f"веса с шага {step} из {args.run / args.checkpoint}")
+    if args.official:
+        dtype = torch.float16 if hp.get("fp16", True) else torch.float32
+        vae_dtype = torch.float16 if hp.get("vae_fp16", False) else torch.float32
+        unet, vae, scheduler = load_official(args.official, device, dtype, vae_dtype)
+        step = 0
+        print(f"опубликованный CatVTON {VARIANTS[args.official]}: guidance "
+              f"{args.official_guidance}, eta {args.eta}")
+    else:
+        unet, vae, scheduler, step, dtype, vae_dtype = load_models(
+            hp, flags, args.run, args.checkpoint, device)
+        print("веса исходные, без обучения" if args.checkpoint == "none"
+              else f"веса с шага {step} из {args.run / args.checkpoint}")
     out_run.mkdir(parents=True, exist_ok=True)
 
     lpips = LearnedPerceptualImagePatchSimilarity(net_type="alex", normalize=True).to(device)
@@ -148,9 +186,14 @@ def main() -> int:
         out_dir.mkdir(parents=True, exist_ok=True)
 
     for batch in tqdm(loader, desc="генерация", unit="batch"):
-        predicted = generate(unet, vae, scheduler, batch, device, dtype, vae_dtype,
-                             args.steps, base_seed=args.seed, flags=flags, token=token,
-                             guidance=args.reliability_guidance)
+        if args.official:
+            predicted = generate_official(unet, vae, scheduler, batch, device, dtype, vae_dtype,
+                                          args.steps, guidance=args.official_guidance,
+                                          eta=args.eta, base_seed=args.seed)
+        else:
+            predicted = generate(unet, vae, scheduler, batch, device, dtype, vae_dtype,
+                                 args.steps, base_seed=args.seed, flags=flags, token=token,
+                                 guidance=args.reliability_guidance)
         truth = batch["person"].to(device, predicted.dtype)
 
         pred_u8, true_u8 = to_uint8(predicted), to_uint8(truth)
@@ -194,6 +237,9 @@ def main() -> int:
     metrics = {
         "run": str(out_run), "weights": str(args.run), "step": step, "pairs": len(per_pair),
         "steps": args.steps, "seed": args.seed, "arch": flags["name"],
+        "official": VARIANTS[args.official] if args.official else None,
+        "official_guidance": args.official_guidance if args.official else None,
+        "eta": args.eta if args.official else None,
         "reliability_token": args.reliability_token if uses_condition(flags) else None,
         "reliability_guidance": args.reliability_guidance if flags["reliability"] else None,
         "ssim": float(per_pair.ssim.mean()),

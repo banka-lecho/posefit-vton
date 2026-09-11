@@ -27,4 +27,4 @@ def arch_flags(hp: dict) -> dict:
 
 def uses_condition(flags: dict) -> bool:
     """Нужно ли глобальное условие (токен надёжности или вектор вещи)."""
-    return bool(flags["reliability"] or flags["garment_embed"])
+    return bool(flags.get("reliability") or flags.get("garment_embed"))

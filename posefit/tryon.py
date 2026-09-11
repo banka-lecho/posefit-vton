@@ -298,22 +298,45 @@ def uncrop(image: np.ndarray, original_size: tuple[int, int]) -> Image.Image:
 
 
 class TryOn:
-    """Обученная модель, собранная по снимку своего прогона, как при замере."""
+    """Модель для примерки, собранная так же, как при замере.
 
-    def __init__(self, run: str | Path | None, checkpoint: str = "final.pt", device: str = "cuda",
-                 train_config: str | Path = "configs/train.yaml", arch: str | None = None,
-                 mask_stage: str | None = None) -> None:
+    run + checkpoint — свой обученный прогон (схема из его снимка);
+    checkpoint="none" — исходный SD inpainting без обучения;
+    official="dresscode" | "vitonhd" | "mix" — опубликованный CatVTON с весами
+    авторов и их настройками вывода (posefit/official.py).
+    """
+
+    def __init__(self, run: str | Path | None = None, checkpoint: str = "final.pt",
+                 device: str = "cuda", train_config: str | Path = "configs/train.yaml",
+                 arch: str | None = None, mask_stage: str | None = None,
+                 official: str | None = None) -> None:
+        import torch
         import yaml
 
         from .arch import arch_flags
         from .evaluation import resolve_eval_config
         from .generation import load_models
+        from .official import VARIANTS, load_official
 
         hp = yaml.safe_load(Path(train_config).read_text(encoding="utf-8"))
+        self.device = device
+        self.official = official
+        if official:
+            self.hp, _ = resolve_eval_config(hp, Path("runs/official"), "none", mask_stage)
+            self.hp["arch"] = {"name": "catvton"}
+            self.source = f"опубликованный CatVTON, веса {VARIANTS[official]}"
+            self.flags = arch_flags(self.hp)
+            self.name, self.step = f"CatVTON {official}", 0
+            self.dtype = torch.float16 if self.hp.get("fp16", True) else torch.float32
+            self.vae_dtype = torch.float16 if self.hp.get("vae_fp16", False) else torch.float32
+            self.unet, self.vae, self.scheduler = load_official(official, device, self.dtype,
+                                                                self.vae_dtype)
+            return
+        if run is None and checkpoint != "none":
+            raise ValueError("для обученной модели нужен каталог прогона run")
         run = Path(run) if run is not None else Path("runs/zero_shot")
         self.hp, self.source = resolve_eval_config(hp, run, checkpoint, mask_stage, arch)
         self.flags = arch_flags(self.hp)
-        self.device = device
         self.name = run.name if checkpoint != "none" else f"{run.name} (без обучения)"
         (self.unet, self.vae, self.scheduler, self.step,
          self.dtype, self.vae_dtype) = load_models(self.hp, self.flags, run, checkpoint, device)
@@ -335,10 +358,16 @@ class TryOn:
                  token: str = "studio", guidance: float = 0.0) -> list[np.ndarray]:
         """Результаты примерки, (H, W, 3) uint8 на каждый пример."""
         from .generation import generate, to_uint8
+        from .official import generate_official
         from .reliability import BUCKETS
 
         batch = collate(items)
-        out = generate(self.unet, self.vae, self.scheduler, batch, self.device, self.dtype,
-                       self.vae_dtype, steps, base_seed=seed, flags=self.flags,
-                       token=BUCKETS.index(token), guidance=guidance)
+        if self.official:
+            # Их настройки вывода: guidance 2.5 и eta 1, как в замере авторов.
+            out = generate_official(self.unet, self.vae, self.scheduler, batch, self.device,
+                                    self.dtype, self.vae_dtype, steps, base_seed=seed)
+        else:
+            out = generate(self.unet, self.vae, self.scheduler, batch, self.device, self.dtype,
+                           self.vae_dtype, steps, base_seed=seed, flags=self.flags,
+                           token=BUCKETS.index(token), guidance=guidance)
         return list(to_uint8(out).cpu().numpy().transpose(0, 2, 3, 1))

@@ -92,3 +92,8 @@ def test_unknown_arch_is_rejected():
 
     with pytest.raises(ValueError, match="неизвестная архитектура"):
         arch_flags({"arch": {"name": "warpnet"}})
+
+
+def test_empty_flags_mean_no_condition():
+    # generate() по умолчанию получает пустой словарь флагов — это базовая схема.
+    assert not uses_condition({})
