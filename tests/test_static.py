@@ -57,13 +57,18 @@ def test_evaluation_never_tracks_gradients():
     """
     import ast
 
-    tree = ast.parse((ROOT / "scripts" / "evaluate.py").read_text(encoding="utf-8"))
-
-    decorators = [ast.unparse(d) for d in _function(tree, "generate").decorator_list]
+    # generate и загрузка модели живут в posefit/generation.py: ими пользуются
+    # и замер, и ноутбук со своими примерами.
+    generation = ast.parse((ROOT / "posefit" / "generation.py").read_text(encoding="utf-8"))
+    decorators = [ast.unparse(d) for d in _function(generation, "generate").decorator_list]
     assert "torch.no_grad()" in decorators, f"generate без no_grad: {decorators}"
 
+    loader_src = ast.unparse(_function(generation, "load_models"))
+    # freeze_except_self_attention размораживает слои внимания — в выводе ей не место.
+    assert "freeze_except_self_attention" not in loader_src
+    assert "unet.requires_grad_(False)" in loader_src
+
+    tree = ast.parse((ROOT / "scripts" / "evaluate.py").read_text(encoding="utf-8"))
     main_src = ast.unparse(_function(tree, "main"))
     assert "torch.set_grad_enabled(False)" in main_src
-    # freeze_except_self_attention размораживает слои внимания — в замере ей не место.
     assert "freeze_except_self_attention" not in main_src
-    assert "unet.requires_grad_(False)" in main_src

@@ -34,6 +34,78 @@ from .reliability import STUDIO_TOKEN
 GARMENT_EMBED_DIM = 768
 
 
+def to_model_image(canonical: Image.Image, size: tuple[int, int]) -> np.ndarray:
+    """Канонический кадр 768x1024 -> (H, W, 3) float32 в [-1, 1] рабочего размера size=(w, h)."""
+    image = canonical.resize(size, Image.BICUBIC)
+    return np.asarray(image, dtype=np.float32) / 127.5 - 1.0
+
+
+def to_model_mask(mask: Image.Image | np.ndarray, size: tuple[int, int]) -> np.ndarray:
+    """Маска 0/255 канонического размера -> (H, W, 1) float32 из {0, 1}."""
+    if isinstance(mask, np.ndarray):
+        mask = Image.fromarray(mask)
+    mask = mask.resize(size, Image.NEAREST)
+    return (np.asarray(mask, dtype=np.float32) > 127).astype(np.float32)[..., None]
+
+
+def make_guides(pose: dict, garment_parse: np.ndarray | Image.Image, mask: np.ndarray,
+                garment: np.ndarray, group: str,
+                size: tuple[int, int]) -> tuple[np.ndarray, np.ndarray]:
+    """Каналы-подсказки обеих половин в рабочем размере: два массива (3, H, W).
+
+    pose — результат стадии pose на каноническом кадре человека; garment_parse —
+    карта parse канонического кадра вещи; mask и garment — уже в рабочем
+    размере (как их отдают to_model_mask и to_model_image).
+    """
+    width, height = size
+    # Поза считалась на каноническом кадре 768x1024; рабочий размер другой.
+    keypoints = scale_keypoints(pose.get("keypoints", {}), TARGET_SIZE, size)
+    person = person_guide(height, width, keypoints, pose.get("scores", {}), group,
+                          fallback_mask=mask[..., 0])
+
+    if not isinstance(garment_parse, Image.Image):
+        garment_parse = Image.fromarray(np.asarray(garment_parse, dtype=np.uint8))
+    parse = np.asarray(garment_parse.resize(size, Image.NEAREST))
+    garment_u8 = ((garment + 1.0) * 127.5).astype(np.uint8)
+    box = garment_box(parse, group, image=garment_u8)
+    return person, garment_guide(height, width, box, group)
+
+
+def garment_vector(vector: np.ndarray) -> np.ndarray:
+    """Вектор стадии embed -> (768,) float32; пустой вектор -> нули.
+
+    Стадия embed пишет пустой вектор, когда вещь на кадре не найдена: модель
+    получает нули, как при выключенном условии.
+    """
+    vector = np.asarray(vector)
+    if vector.shape != (GARMENT_EMBED_DIM,):
+        return np.zeros(GARMENT_EMBED_DIM, dtype=np.float32)
+    return vector.astype(np.float32)
+
+
+def pack_item(person: np.ndarray, garment: np.ndarray, mask: np.ndarray, pair_id: str,
+              category_group: str = "", reliability: int = STUDIO_TOKEN,
+              guides: tuple[np.ndarray, np.ndarray] | None = None,
+              garment_embed: np.ndarray | None = None) -> dict:
+    """Пример в том виде, в каком его ждут обучение, замер и генерация."""
+    item = {
+        "person": np.ascontiguousarray(person.transpose(2, 0, 1)),
+        "garment": np.ascontiguousarray(garment.transpose(2, 0, 1)),
+        "mask": np.ascontiguousarray(mask.transpose(2, 0, 1)),
+        "pair_id": pair_id,
+        # Для разбивки метрик по группам одежды при замере.
+        "category_group": category_group,
+        "reliability": int(reliability),
+    }
+    if guides is not None:
+        item["guide_person"] = np.ascontiguousarray(guides[0])
+        item["guide_garment"] = np.ascontiguousarray(guides[1])
+        assert item["guide_person"].shape[0] == GUIDE_CHANNELS
+    if garment_embed is not None:
+        item["garment_embed"] = garment_vector(garment_embed)
+    return item
+
+
 @dataclass(frozen=True)
 class Sample:
     person: np.ndarray      # (H, W, 3) float32 в [-1, 1]
@@ -75,39 +147,23 @@ class VTONPairs(Dataset):
         return len(self.pairs)
 
     def _image(self, rel_path: str) -> np.ndarray:
-        image = load_canonical(self.raw_root / rel_path).resize(self.size, Image.BICUBIC)
-        return np.asarray(image, dtype=np.float32) / 127.5 - 1.0
+        return to_model_image(load_canonical(self.raw_root / rel_path), self.size)
 
     def _mask(self, sku_id: str, image_id: str) -> np.ndarray:
         path = output_path(self.preproc_root, self.mask_stage, sku_id, image_id)
-        mask = Image.open(path).resize(self.size, Image.NEAREST)
-        return (np.asarray(mask, dtype=np.float32) > 127).astype(np.float32)[..., None]
+        return to_model_mask(Image.open(path), self.size)
 
     def _guides(self, row, mask: np.ndarray, garment: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         """Каналы-подсказки обеих половин в пикселях рабочего размера (3, H, W)."""
-        width, height = self.size
-        group = str(row.get("category_group", "upper"))
-
         pose = json.loads(output_path(self.preproc_root, "pose", row["sku_id"],
                                       row["person_image_id"]).read_text(encoding="utf-8"))
-        # Поза считалась на каноническом кадре 768x1024; рабочий размер другой.
-        keypoints = scale_keypoints(pose.get("keypoints", {}), TARGET_SIZE, self.size)
-        person = person_guide(height, width, keypoints, pose.get("scores", {}), group,
-                              fallback_mask=mask[..., 0])
-
-        parse_path = output_path(self.preproc_root, "parse", row["sku_id"], row["garment_image_id"])
-        parse = np.asarray(Image.open(parse_path).resize(self.size, Image.NEAREST))
-        garment_u8 = ((garment + 1.0) * 127.5).astype(np.uint8)
-        box = garment_box(parse, group, image=garment_u8)
-        return person, garment_guide(height, width, box, group)
+        parse = Image.open(output_path(self.preproc_root, "parse", row["sku_id"],
+                                       row["garment_image_id"]))
+        return make_guides(pose, parse, mask, garment,
+                           str(row.get("category_group", "upper")), self.size)
 
     def _embed(self, sku_id: str, image_id: str) -> np.ndarray:
-        vector = np.load(output_path(self.preproc_root, "embed", sku_id, image_id))
-        if vector.shape != (GARMENT_EMBED_DIM,):
-            # Стадия embed пишет пустой вектор, когда вещь на кадре не найдена:
-            # модель получает нули, как при выключенном условии.
-            return np.zeros(GARMENT_EMBED_DIM, dtype=np.float32)
-        return vector.astype(np.float32)
+        return garment_vector(np.load(output_path(self.preproc_root, "embed", sku_id, image_id)))
 
     def __getitem__(self, index: int) -> dict:
         row = self.pairs.iloc[index]
@@ -127,19 +183,11 @@ class VTONPairs(Dataset):
                     # обе половины отражены одинаково, соответствие сохраняется.
                     guides = (guides[0][:, :, ::-1], guides[1][:, :, ::-1])
 
-        item = {
-            "person": np.ascontiguousarray(person.transpose(2, 0, 1)),
-            "garment": np.ascontiguousarray(garment.transpose(2, 0, 1)),
-            "mask": np.ascontiguousarray(mask.transpose(2, 0, 1)),
-            "pair_id": row["pair_id"],
-            # Для разбивки метрик по группам одежды при замере.
-            "category_group": str(row.get("category_group", "")),
-            "reliability": int(row["reliability"]) if "reliability" in row else STUDIO_TOKEN,
-        }
-        if guides is not None:
-            item["guide_person"] = np.ascontiguousarray(guides[0])
-            item["guide_garment"] = np.ascontiguousarray(guides[1])
-            assert item["guide_person"].shape[0] == GUIDE_CHANNELS
-        if self.garment_embed:
-            item["garment_embed"] = self._embed(row["sku_id"], row["garment_image_id"])
-        return item
+        return pack_item(
+            person, garment, mask, row["pair_id"],
+            category_group=str(row.get("category_group", "")),
+            reliability=int(row["reliability"]) if "reliability" in row else STUDIO_TOKEN,
+            guides=guides,
+            garment_embed=(self._embed(row["sku_id"], row["garment_image_id"])
+                           if self.garment_embed else None),
+        )

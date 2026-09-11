@@ -86,15 +86,16 @@ STAGES = {
 }
 
 
-def load_canonical(path: Path, size: tuple[int, int] = TARGET_SIZE) -> Image.Image:
+def load_canonical(path: Path | Image.Image, size: tuple[int, int] = TARGET_SIZE) -> Image.Image:
     """Кадр, приведённый к целевому размеру с сохранением пропорций и паддингом.
 
     Пропорции у отзывов гуляют от 450x1000 до 1000x750, и растягивание исказило
     бы силуэт — а именно его модель и учится воспроизводить. Все стадии
     препроцессинга считались через эту же функцию, поэтому маски и позы
-    совмещаются с кадром пиксель в пиксель.
+    совмещаются с кадром пиксель в пиксель. Принимает путь или уже открытое
+    изображение (ноутбук со своими примерами).
     """
-    image = Image.open(path).convert("RGB")
+    image = (path if isinstance(path, Image.Image) else Image.open(path)).convert("RGB")
     target_w, target_h = size
     scale = min(target_w / image.width, target_h / image.height)
     resized = image.resize((max(1, round(image.width * scale)),
